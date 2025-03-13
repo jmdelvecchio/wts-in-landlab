@@ -45,7 +45,6 @@ def plot_average_psd(arr, fs=1.0):
     arr (numpy.ndarray): Input array with dimensions (ny, nx).
     fs (float): Sampling frequency. Default is 1.0.
     """
-    ny, nx = arr.shape
     psd_list = []
 
     # Compute PSD for each row
@@ -93,10 +92,11 @@ z[:] = -a * y**2 + a * max(y)**2
 # kappa = 2*np.pi/lam
 # zb[:] = z - b + zinthat * np.cos(kappa * x)
 # zb[:] = z - b # set constant permeable thickness b
-lam = 5
-zb[:] = z - b + 0.05 * generate_correlated_random_field(Ny, Nx, lam/dx).flatten()
-zb0 = zb.copy()
 
+lam = 5 # wavelength of perturbation 
+alpha = 0.05 # amplitude of perturbation
+zb[:] = z - b + alpha * generate_correlated_random_field(Ny, Nx, lam/dx).flatten()
+zb0 = zb.copy() # save original base of active layer for later comparison
 zwt[:] = z # start water table at the surface
 
 
@@ -210,7 +210,7 @@ plot_average_psd(zb0.reshape(mg.shape), fs=1.0)
 q = mg.at_node['surface_water__specific_discharge']
 plot_average_psd(q.reshape(mg.shape), fs=1.0)
 
-# %% Test Lazy Evolution
+# %% Test Simple Evolution
 
 T = 365*24*3600
 dt = 3600*6
@@ -218,13 +218,12 @@ N = T//dt
 
 thaw_rate_background = 1e-7
 Q_coeff = 1e-3
+tol = 1e-10
 
-slp = np.max(mg.at_node['topographic__steepest_slope'], axis=1) # we are not evolving topography, so the topographic slope stays constant
 for i in tqdm(range(N)):
 
     # run groundwater model to get steady state solution
     diff = 1
-    tol = 1e-10
     iter = 0
     while diff > tol and iter < 20:
         zwt0 = zwt.copy()
@@ -238,17 +237,13 @@ for i in tqdm(range(N)):
     hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(mg, gdp._hydr_grad)
     Q_node = Q_coeff * np.abs(vel_x * hydgr_x + vel_y * hydgr_y) # absolute value of the dot product, just like in the model description
 
-    ##  lazy way using a gdp function and topographic slope
-    # gwf = gdp.calc_gw_flux_at_node() # the total groundwater flux out of a node
-    # Q_node = Q_coeff * (gwf / (z-zb)) * slp  # a simple but not quite accurate way to calculate Q_node
-
     # evolve based on some simple criteria for z
     zb -= (Q_node + thaw_rate_background) * dt
 
 
-# %%
+# %% plot profiles of quantity f along the hillslope
 
-f = zb - zb0
+f = zb - zb0 # change in thickness
 # f = zwt0-zwt
 plt.figure()
 imshow_grid(mg, f, colorbar_label='zb-zb0', cmap='viridis')
@@ -259,16 +254,3 @@ fg = f.reshape(mg.shape)
 plt.figure()
 for i in range(0,200,20):
     plt.plot(fg[i,1:-1])
-
-
-# %%
-
-
-from landlab.plot.graph import plot_graph
-
-grid = RasterModelGrid((4, 5), xy_spacing=(3, 4))
-plot_graph(grid, at="node")
-#%%
-plot_graph(grid, at="link")# %%
-
-# %%
