@@ -239,12 +239,12 @@ plt.figure()
 imshow_grid(mg, Q_node, cmap='Blues')
 plt.title('Q_node')
 
-irradiance = 600
-melt_rate = ((irradiance + 2.73 * -20.0 + Q_node)/(3343e3 * 0.5))
-plt.figure()
-imshow_grid(mg, melt_rate, cmap='Blues')
-plt.title('Melt for 1 second\n ')
-print(f'Max melt rate: {np.max(melt_rate)}; min melt rate: {np.min(melt_rate)}')
+# irradiance = 600
+# melt_rate = ((irradiance + 2.73 * -20.0 + Q_node)/(3343e3 * 0.5)) 
+# plt.figure()
+# imshow_grid(mg, melt_rate, cmap='Blues')
+# plt.title('Melt for 1 second\n ')
+# print(f'Max melt rate: {np.max(melt_rate)}; min melt rate: {np.min(melt_rate)}')
 
 # These plots make it clear why Q_node remains so uniform: the flux is dominated by
 # the downslope direction, which is not really affected by perturbations. Cross slope
@@ -299,15 +299,26 @@ for i in tqdm(range(N)):
 
     # evolve based on some simple criteria for z
     # zb -= (Q_node + thaw_rate_background) * dt
-    zb -= ((irradiance + 2.73 * -20.0 + Q_node)/(3343e3 * 0.5))
+    melt_depth = ((irradiance + 2.73 * -20.0 + Q_node)/(3343e3 * 0.5)) * dt
+
+    zb -= melt_depth
+
+    #if zb > z then make it equal to z
+    if (zb > z).any():
+        zb[zb > z] = z[zb > z]
+        # print('oh no zb > b setting it to z <3')
+
+    zwt[:] = zb + melt_depth + gdp._thickness
+
     if i % 100 == 0:
         f = zb - zb0
         # f = zwt0-zwt
         # plt.figure()
         # imshow_grid(mg, f, colorbar_label='zb-zb0', cmap='viridis')
         # axes[2].set_title(f'zb-zb0 at timestep {i}')
-        print(f'Max melt at timestep {i} is {np.max(((irradiance + 2.73 * -20.0 + Q_node)/(3343e3 * 0.5)))}')
+        print(f'Max melt at timestep {i} is {np.max(((irradiance + 2.73 * -20.0 + Q_node)/(3343e3 * 0.5)))* dt}')
         print(f'Max zb-zb0 at timestep {i} is {np.max(f)}')
+        print(f'Max Q_node at timestep {i} is {np.max(Q_node)}')
 
 # %%
 
