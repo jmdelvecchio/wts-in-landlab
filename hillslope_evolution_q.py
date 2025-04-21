@@ -17,7 +17,7 @@ from landlab import RasterModelGrid, imshow_grid
 from landlab.components import GroundwaterDupuitPercolator, FlowAccumulator
 from landlab.grid.raster_mappers import map_link_vector_components_to_node_raster
 
-def generate_correlated_random_field(Nx, Ny, l):
+def generate_correlated_random_field(Nx, Ny, l, seed):
     """
     Generate a 2D array of random values with spatial correlation.
 
@@ -29,6 +29,8 @@ def generate_correlated_random_field(Nx, Ny, l):
     Returns:
     np.ndarray: 2D array of spatially correlated random values.
     """
+
+    np.random.seed(seed)
     # Generate a 2D array of random values
     random_field = np.random.randn(Nx, Ny)
     
@@ -45,7 +47,7 @@ def plot_average_psd(arr, fs=1.0):
     arr (numpy.ndarray): Input array with dimensions (ny, nx).
     fs (float): Sampling frequency. Default is 1.0.
     """
-    ny, nx = arr.shape
+
     psd_list = []
 
     # Compute PSD for each row
@@ -108,7 +110,7 @@ def melt_rate(t_seconds,
     # Convert energy flux to melt rate in meters per second
     # PLus or minus if you care about this "melt factor" fudge
     # melt_rate_per_second = (energy_flux / L) * melt_factor
-    melt_rate_per_second = (energy_flux / L)#* melt_factor
+    melt_rate_per_second = (energy_flux / (L*rho_ice))#* melt_factor
 
     return melt_rate_per_second
 
@@ -140,7 +142,7 @@ z[:] = -a * y**2 + a * max(y)**2
 # zb[:] = z - b + zinthat * np.cos(kappa * x)
 # zb[:] = z - b # set constant permeable thickness b
 lam = 5
-zb[:] = z - b + 0.05 * generate_correlated_random_field(Ny, Nx, lam/dx).flatten()
+zb[:] = z - b + 0.05 * generate_correlated_random_field(Ny, Nx, lam/dx, 2142025).flatten()
 zb0 = zb.copy()
 
 zwt[:] = z # start water table at the surface
@@ -180,6 +182,7 @@ gdp = GroundwaterDupuitPercolator(
     recharge_rate=r,
     hydraulic_conductivity=ksat,
     porosity=n,
+    regularization_f=0.1,
 )
 
 # surface water routing (not actually used for subsurface evolution at the moment)
@@ -269,7 +272,7 @@ dt = 3600*6
 N = T//dt
 
 doy_shift_seconds = 180 * 86400  # Shift so max irradiance happens in summer
-S0=700
+S0 = 700
 
 thaw_rate_background = 1e-7
 Q_coeff = 1
@@ -287,6 +290,13 @@ for i in tqdm(range(N)):
         diff = np.max(zwt0-zwt)
         iter += 1
         # print(diff)
+
+    ## use for debuggin: it is usually zwt that gives nans.
+    # a1 = np.isnan(gdp._vel).any()
+    # a2 = np.isnan(gdp._hydr_grad).any()
+    # a3 = np.isnan(zwt).any()
+    # if a1 or a2 or a3:
+    #     break
     
     # calculate Q with the actual darcy velocity *  hydraulic gradient
     vel_x, vel_y = map_link_vector_components_to_node_raster(mg, gdp._vel) # get mean value in x and y directions at node
@@ -299,16 +309,17 @@ for i in tqdm(range(N)):
 
     # evolve based on some simple criteria for z
     # zb -= (Q_node + thaw_rate_background) * dt
-    melt_depth = ((irradiance + 2.73 * -20.0 + Q_node)/(3343e3 * 0.5)) * dt
 
-    zb -= melt_depth
+    # (J/(m2*s)) / (J/kg * porosity * kg/m3) * (s)
+    melt_depth = ((irradiance + 2.73 * -20.0 + Q_node)/(334e3 * 0.5 * 1000)) * dt
+    zb[mg.core_nodes] = zb[mg.core_nodes] - melt_depth[mg.core_nodes]
 
     #if zb > z then make it equal to z
     if (zb > z).any():
-        zb[zb > z] = z[zb > z]
-        # print('oh no zb > b setting it to z <3')
+        zb[zb > z] = z[zb > z] - 1e-3
+        print('oh no zb > z setting it to z - delta <3')
 
-    zwt[:] = zb + melt_depth + gdp._thickness
+    zwt[mg.core_nodes] = (zb + melt_depth + gdp._thickness)[mg.core_nodes]
 
     if i % 100 == 0:
         f = zb - zb0
@@ -316,7 +327,7 @@ for i in tqdm(range(N)):
         # plt.figure()
         # imshow_grid(mg, f, colorbar_label='zb-zb0', cmap='viridis')
         # axes[2].set_title(f'zb-zb0 at timestep {i}')
-        print(f'Max melt at timestep {i} is {np.max(((irradiance + 2.73 * -20.0 + Q_node)/(3343e3 * 0.5)))* dt}')
+        print(f'Max melt at timestep {i} is {np.max(melt_depth)}')
         print(f'Max zb-zb0 at timestep {i} is {np.max(f)}')
         print(f'Max Q_node at timestep {i} is {np.max(Q_node)}')
 
