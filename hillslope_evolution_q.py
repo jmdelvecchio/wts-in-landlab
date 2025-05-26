@@ -68,7 +68,7 @@ def plot_average_psd(arr, fs=1.0):
     plt.show()
 
 def melt_rate(t_seconds,
-                S0=700, # This is twice as high as it should be but I couldn't get the thaw to be deep enough
+                S0=700, # 700 This is twice as high as it should be but I couldn't get the thaw to be deep enough
                 L = 334E3 * 0.5, # ice content modulated by porosity?  # 334000,
                 Ks=2.73, 
                 dTdz=-20.0, 
@@ -109,10 +109,28 @@ def melt_rate(t_seconds,
 
     # Convert energy flux to melt rate in meters per second
     # PLus or minus if you care about this "melt factor" fudge
-    # melt_rate_per_second = (energy_flux / L) * melt_factor
+    # melt_rate_per_second = (energy_flux / (L) * melt_factor
     melt_rate_per_second = (energy_flux / (L*rho_ice))#* melt_factor
 
     return melt_rate_per_second
+
+#%% Visualize melt rate
+
+dt = 100
+Q1 = 10
+t = np.arange(0,60*60*24*365,dt)
+plt.figure()
+
+
+fig, ax = plt.subplots()
+ax.plot(t, melt_rate(t), label='Q=0')
+ax.plot(t, melt_rate(t,Q=Q1), label='Q>0')
+
+ax1 = ax.twinx()
+ax1.plot(t, np.cumsum(melt_rate(t))*dt, label='Q=0 cumulative', linestyle='--')
+ax1.plot(t, np.cumsum(melt_rate(t, Q=Q1))*dt, label='Q>0 cumulative', linestyle='--')
+plt.legend()
+
 
 #%% Create the grid, add basic fields
 
@@ -125,8 +143,8 @@ zb = mg.add_zeros('aquifer_base__elevation', at='node')
 zwt = mg.add_zeros("water_table__elevation", at="node")
 
 # some parameters
-b = 0.5 # permeable thickness m
-r = 1.0e-7 # recharge rate (constant, uniform here) m/s
+b = 50 # permeable thickness m
+r = 2.0e-8 # recharge rate (constant, uniform here) m/s
 ksat = 1e-4 # hydraulic conductivity (constant, uniform here) m/s
 n = 0.1 # porosity (constant, uniform here) -- does not matter for steady state solution
 routing_method = 'MFD' # could also be 'D8' or 'Steepest'
@@ -142,10 +160,10 @@ z[:] = -a * y**2 + a * max(y)**2
 # zb[:] = z - b + zinthat * np.cos(kappa * x)
 # zb[:] = z - b # set constant permeable thickness b
 lam = 5
-zb[:] = z - b + 0.05 * generate_correlated_random_field(Ny, Nx, lam/dx, 2142025).flatten()
+zb[:] = z - b + 0.05 * generate_correlated_random_field(Ny, Nx, lam/dx * 2, 2142025).flatten()
 zb0 = zb.copy()
 
-zwt[:] = z # start water table at the surface
+zwt[:] = zb + 0.5 # start water table at the surface
 
 
 fig, axes = plt.subplots(1, 3, figsize=(12, 5))
@@ -236,6 +254,16 @@ plt.figure()
 imshow_grid(mg, (zwt-zb)/(z-zb), cmap='Blues')
 plt.title('Relative Saturated Thickness')
 
+# x velocity
+plt.figure()
+imshow_grid(mg, vel_x, cmap='RdBu')
+plt.title('Vel_x')
+
+# y velocity
+plt.figure()
+imshow_grid(mg, vel_y, cmap='Blues')
+plt.title('Vel_y')
+
 #%%
 # Q rate
 plt.figure()
@@ -271,15 +299,11 @@ T = 365*24*3600
 dt = 3600*6
 N = T//dt
 
-doy_shift_seconds = 180 * 86400  # Shift so max irradiance happens in summer
-S0 = 700
-
-thaw_rate_background = 1e-7
-Q_coeff = 1
+Q_coeff = 1 #100
 
 slp = np.max(mg.at_node['topographic__steepest_slope'], axis=1) # we are not evolving topography, so the topographic slope stays constant
 for i in tqdm(range(N)):
-    irradiance = S0 * np.cos(2 * np.pi * (i * dt - doy_shift_seconds) / T)
+
     # run groundwater model to get steady state solution
     diff = 1
     tol = 1e-10
@@ -303,15 +327,7 @@ for i in tqdm(range(N)):
     hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(mg, gdp._hydr_grad)
     Q_node = Q_coeff * np.abs(vel_x * hydgr_x + vel_y * hydgr_y) # absolute value of the dot product, just like in the model description
 
-    ##  lazy way using a gdp function and topographic slope
-    # gwf = gdp.calc_gw_flux_at_node() # the total groundwater flux out of a node
-    # Q_node = Q_coeff * (gwf / (z-zb)) * slp  # a simple but not quite accurate way to calculate Q_node
-
-    # evolve based on some simple criteria for z
-    # zb -= (Q_node + thaw_rate_background) * dt
-
-    # (J/(m2*s)) / (J/kg * porosity * kg/m3) * (s)
-    melt_depth = ((irradiance + 2.73 * -20.0 + Q_node)/(334e3 * 0.5 * 1000)) * dt
+    melt_depth = melt_rate(i*dt,Q=Q_node) * dt # use the function initialized at the beginning
     zb[mg.core_nodes] = zb[mg.core_nodes] - melt_depth[mg.core_nodes]
 
     #if zb > z then make it equal to z
