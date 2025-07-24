@@ -3,6 +3,7 @@ Set up and run the GroundwaterDupuitPercolator on a test hillslope
 Calculate the factor Q, and evolve the subsurface assuming a linear relationship
 between Q and rate of active layer deepening.
 
+In this version, radiative forcing is time variable, reflecting seasonal changes in solar irradiance.
 """
 
 #%%
@@ -121,7 +122,6 @@ Q1 = 10
 t = np.arange(0,60*60*24*365,dt)
 plt.figure()
 
-
 fig, ax = plt.subplots()
 ax.plot(t, melt_rate(t), label='Q=0')
 ax.plot(t, melt_rate(t,Q=Q1), label='Q>0')
@@ -130,7 +130,6 @@ ax1 = ax.twinx()
 ax1.plot(t, np.cumsum(melt_rate(t))*dt, label='Q=0 cumulative', linestyle='--')
 ax1.plot(t, np.cumsum(melt_rate(t, Q=Q1))*dt, label='Q>0 cumulative', linestyle='--')
 plt.legend()
-
 
 #%% Create the grid, add basic fields
 
@@ -143,29 +142,28 @@ zb = mg.add_zeros('aquifer_base__elevation', at='node')
 zwt = mg.add_zeros("water_table__elevation", at="node")
 
 # some parameters
-b = 50 # permeable thickness m
-r = 2.0e-8 # recharge rate (constant, uniform here) m/s
-ksat = 1e-4 # hydraulic conductivity (constant, uniform here) m/s
-n = 0.1 # porosity (constant, uniform here) -- does not matter for steady state solution
-routing_method = 'MFD' # could also be 'D8' or 'Steepest'
+b = 0.5 # permeable thickness m
+r = 1.0e-7 # recharge rate (constant, uniform here) m/s
+ksat = 1e-2 # hydraulic conductivity (constant, uniform here) m/s
+n = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
+S0 = 75 # W/m^2, peak solar irradiance
+rho_w = 1000 # kg/m^3
+g = 9.81 # m/s^2
 
-# some example parabolic hillslopes, just made up
+# some example parabolic hillslope, just made up
 x = mg.x_of_node
 y = mg.y_of_node
 a = 0.0002
 z[:] = -a * y**2 + a * max(y)**2
 
-# zinthat = 0.2
-# kappa = 2*np.pi/lam
-# zb[:] = z - b + zinthat * np.cos(kappa * x)
-# zb[:] = z - b # set constant permeable thickness b
-lam = 5
-zb[:] = z - b + 0.05 * generate_correlated_random_field(Ny, Nx, lam/dx * 2, 2142025).flatten()
+# generate a random field to perturb the base elevation
+lam = 5 # correlation length for the random field
+alpha = 0.1 # scaling factor for the random field
+zb[:] = z - b + alpha * generate_correlated_random_field(Ny, Nx, lam/dx * 2, 2142025).flatten()
 zb0 = zb.copy()
+zwt[:] = zb + b # start water table at the surface
 
-zwt[:] = zb + 0.5 # start water table at the surface
-
-
+# overview plots
 fig, axes = plt.subplots(1, 3, figsize=(12, 5))
 plt.sca(axes[0])
 imshow_grid(mg, z, colorbar_label='z')
@@ -181,7 +179,6 @@ axes[2].set_title('Active Zone Thickness')
 
 plt.tight_layout()
 plt.show()
-
 
 # 3D plot of the hillslope
 # fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
@@ -203,14 +200,6 @@ gdp = GroundwaterDupuitPercolator(
     regularization_f=0.1,
 )
 
-# surface water routing (not actually used for subsurface evolution at the moment)
-fa = FlowAccumulator(
-    mg,
-    surface="topographic__elevation",
-    flow_director=routing_method,
-    runoff_rate="surface_water__specific_discharge",
-)
-
 # %% run groundwater model to steady state
 
 diff = 1
@@ -220,16 +209,13 @@ while diff > tol:
     gdp.run_with_adaptive_time_step_solver(1e5)
     diff = np.max(zwt0-zwt)
     print(diff)
-
 gwf = gdp.calc_gw_flux_at_node() # map groundwater flux to node (easier to plot)
-fa.run_one_step() # calculate flow directions and route surface water (if any is generated)
 
-
-Q_coeff = 1
-# calculate Q with the actual darcy velocity *  hydraulic gradient
+# calculate internal heating factor Q
+Q_coeff = rho_w * g # convert from head gradient to pressure gradient 
 vel_x, vel_y = map_link_vector_components_to_node_raster(mg, gdp._vel) # get mean value in x and y directions at node
 hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(mg, gdp._hydr_grad)
-Q_node = Q_coeff * np.abs(vel_x * hydgr_x + vel_y * hydgr_y) # absolute value of the dot product, just like in the model description
+Q_node = Q_coeff * np.abs(vel_x * hydgr_x + vel_y * hydgr_y) # absolute value of the dot product, as in the model description
 
 
 # %% Some figures
@@ -244,15 +230,14 @@ plt.figure()
 imshow_grid(mg, 'surface_water__specific_discharge', cmap='viridis')
 plt.title('Local Runoff')
 
-# routed runoff
-plt.figure()
-imshow_grid(mg, 'surface_water__discharge', cmap='viridis')
-plt.title('Surface Water Discharge')
-
 # saturated thickness
 plt.figure()
 imshow_grid(mg, (zwt-zb)/(z-zb), cmap='Blues')
 plt.title('Relative Saturated Thickness')
+
+# These plots make it clear why Q_node remains so uniform: the flux is dominated by
+# the downslope direction, which is not really affected by perturbations. Cross slope
+# gradients are much smaller, don't really appear when added together.
 
 # x velocity
 plt.figure()
@@ -264,35 +249,15 @@ plt.figure()
 imshow_grid(mg, vel_y, cmap='Blues')
 plt.title('Vel_y')
 
-#%%
-# Q rate
+# Q (heat source) rate
 plt.figure()
-imshow_grid(mg, Q_node, cmap='Blues')
+imshow_grid(mg, Q_node, cmap='plasma')
 plt.title('Q_node')
-
-# irradiance = 600
-# melt_rate = ((irradiance + 2.73 * -20.0 + Q_node)/(3343e3 * 0.5)) 
-# plt.figure()
-# imshow_grid(mg, melt_rate, cmap='Blues')
-# plt.title('Melt for 1 second\n ')
-# print(f'Max melt rate: {np.max(melt_rate)}; min melt rate: {np.min(melt_rate)}')
-
-# These plots make it clear why Q_node remains so uniform: the flux is dominated by
-# the downslope direction, which is not really affected by perturbations. Cross slope
-# gradients are much smaller, don't really appear when added together.
-# plt.figure()
-# imshow_grid(mg, vel_y, cmap='Blues')
-
-# plt.figure()
-# imshow_grid(mg, vel_x, cmap='Blues')
-
-#%%
 
 # plot_average_psd(Q_node.reshape(mg.shape), fs=1.0)
 # plot_average_psd(zb0.reshape(mg.shape), fs=1.0)
 # q = mg.at_node['surface_water__specific_discharge']
 # plot_average_psd(q.reshape(mg.shape), fs=1.0)
-
 # %% Test Lazy Evolution
 
 T = 365*24*3600
