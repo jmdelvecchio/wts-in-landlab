@@ -19,6 +19,106 @@ from landlab import RasterModelGrid, imshow_grid
 from landlab.components import GroundwaterDupuitPercolator
 from landlab.grid.raster_mappers import map_link_vector_components_to_node_raster
 
+import numpy as np
+from scipy import optimize
+
+def calc_one_wavelength(
+    slope_deg,
+    frozen_grad,
+    unfrozen_grad,
+    x_t = 1600,
+    # slope_deg = 5.0,
+    porosity=0.9,
+    # frozen_grad = 10,
+    # unfrozen_grad = 30,
+    beta = 0.04,
+    flow_speed = 0.1
+    ):
+    
+    def get_wavelength(RHS, LHS_den_term):
+
+    # """Numerically solves for kappa and then wavelength
+    # """
+        def f(kappa):
+
+            LHS_num = kappa**(8/3)
+
+            # LHS_den = (kappa**2 + ((C_f*rho_f*(Q_bar_calc-(beta*unfrozen_grad)))/(K_f*rho_w*L_curly)))**(0.5)
+            LHS_den = (kappa**2 + ((LHS_den_term)))**(0.5)
+
+            LHS = LHS_num / LHS_den
+
+            
+            return LHS - RHS
+
+
+        try:
+            sol = optimize.root_scalar(f, bracket=[
+                RHS**(3/5), # Keeps it the "right" solution
+                3e2], method='brentq')
+            wavelength = 2*3.1415/sol.root
+        except ValueError:
+            # print(f'No solution > RHS**(3/5) when RHS ={RHS}')
+            wavelength = np.nan
+
+        return wavelength
+    
+    # Match sign convention of original wavelength formulation
+    frozen_grad = abs(frozen_grad)
+    unfrozen_grad = abs(unfrozen_grad)
+    
+    # Constants
+    rho_w = 1000 # kg m^3 
+    rho_s = 2600
+    rho_i = 900
+
+    C_w = 4184 # J K-1 kg-1 
+    C_s = 700 
+    C_i = 2050
+
+    K_w = 0.598 # W/m·K 
+    K_s = 1.460 * 5
+    K_i = 2.220
+
+    g = 9.8
+    visc = 8.9E-4
+    rho_l = 1000
+    
+    rho_u = rho_s*(1-porosity) + (rho_w * porosity)
+    rho_f = rho_s*(1-porosity) + (rho_i * porosity)
+
+    C_u = C_s*(1-porosity) + (C_w * porosity)
+    C_f = C_s*(1-porosity) + (C_i * porosity)
+
+    K_u = K_s*(1-porosity) + (K_w * porosity)
+    K_f = K_s*(1-porosity) + (K_i * porosity)
+    slope = np.tan(np.deg2rad(slope_deg))
+
+    L_curly = 334E3 * porosity # Latent head of fusion modulated by porosity
+
+    C_f = C_s*(1-porosity) + (C_i * porosity)
+
+    K_f = K_s*(1-porosity) + (K_i * porosity)
+    
+    # print(f'Using flow speed {flow_speed}')
+    slope = np.tan(np.deg2rad(slope_deg))
+
+    L_curly = 334E3 * porosity # Latent head of fusion modulated by porosity
+
+    K_f = K_s*(1-porosity) + (K_i * porosity)
+
+    # Calculate Q_bar, which is based on both
+    Q_bar_calc = (flow_speed * rho_w * g * slope)
+
+    growth_rate = (1/(rho_w*porosity*L_curly)) * (Q_bar_calc - (beta * unfrozen_grad))
+
+    RHS = (2.0374 * (Q_bar_calc)) / (x_t**(2/3) * (K_f * frozen_grad))
+    # print(f'Using RHS {RHS}')
+    LHS_den_term = ((C_f*rho_f*(Q_bar_calc-(beta*unfrozen_grad)))/(K_f*rho_w*L_curly))
+    wavelength = get_wavelength(RHS, LHS_den_term)
+    return [wavelength, growth_rate]
+    # return wavelength
+    
 def generate_correlated_random_field(Nx, Ny, l, seed):
     """
     Generate a 2D array of random values with spatial correlation.
@@ -102,22 +202,36 @@ def const_melt_rate(
 
 #%% Visualize melt rate
 
+slope_deg = 4.8 # use Warburton and others' value for slope gradient, 4.8 degrees
+dTdz = -20.0
+
 S0 = 75 # W/m^2, peak solar irradiance
 rho_w = 1000 # kg/m^3
 g = 9.81 # m/s^2
 u = np.geomspace(1e-5, 1e-1, 10) # m/s, velocity of water flow
-hydr = np.sin(4.8 * np.pi/180) # use Warburton and others' value for slope gradient, 4.8 degrees
+hydr = np.sin(slope_deg * np.pi/180) 
 
 Q = rho_w * g * u * hydr # W/m^2 internal heat dissipation
 
 plt.figure()
-plt.plot(u, const_melt_rate(S0=S0, Q=Q)*3600*24*90, 'o-')
+plt.plot(u, const_melt_rate(S0=S0, Q=Q, dTdz=dTdz)*3600*24*90, 'o-')
 plt.xlabel('Water Flow Velocity (m/s)')
 plt.ylabel('90 Day Melt Rate (m)')
 plt.title('Melt Rate vs Water Flow Velocity')
 # plt.xscale('log')
 # plt.yscale('log')
 plt.grid(True)
+
+#%% Find wavelength and growth rate of these parameters
+
+wavelength, growth_rate = calc_one_wavelength(
+    slope_deg=slope_deg,
+    frozen_grad=dTdz,
+    unfrozen_grad=dTdz,
+    )
+
+print(f'Wavelength: {round(wavelength, 2)} meters')
+print(f'You can form it over: {round(1/(growth_rate * 3.15e7),3)} years')
 
 #%% Create the grid, add basic fields
 
@@ -197,7 +311,7 @@ while diff > tol:
     gdp.run_with_adaptive_time_step_solver(1e5)
     diff = np.max(zwt0-zwt)
     print(diff)
-gwf = gdp.calc_gw_flux_at_node() # map groundwater flux to node (easier to plot)
+gwf0 = gdp.calc_gw_flux_at_node() # map groundwater flux to node (easier to plot)
 
 # calculate internal heating factor Q
 Q_coeff = rho_w * g # convert from head gradient to pressure gradient 
@@ -210,7 +324,7 @@ Q_node = Q_coeff * np.abs(vel_x * hydgr_x + vel_y * hydgr_y) # absolute value of
 
 # groundwater flux, mapped from links to nodes
 plt.figure()
-imshow_grid(mg, gwf, cmap='plasma')
+imshow_grid(mg, gwf0, cmap='plasma')
 plt.title('Groundwater Flux at Node')
 
 # local produced runoff
@@ -296,6 +410,9 @@ for i in tqdm(range(N)):
 
 f = zb - zb0
 # f = zwt0-zwt
+
+gwf = gdp.calc_gw_flux_at_node() # map groundwater flux to node (easier to plot)
+
 fg = f.reshape(mg.shape)
 
 plt.figure()
@@ -309,3 +426,7 @@ plt.title('Active Zone Thickness')
 plt.figure()
 imshow_grid(mg, f, colorbar_label='zb-zb0', cmap='viridis')
 plt.title('Active Zone Change')
+
+plt.figure()
+imshow_grid(mg, gwf0 - gwf, cmap='plasma')
+plt.title('Change in Groundwater Flux at Node')
