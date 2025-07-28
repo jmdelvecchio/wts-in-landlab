@@ -27,30 +27,22 @@ def calc_one_wavelength(
     frozen_grad,
     unfrozen_grad,
     x_t = 1600,
-    # slope_deg = 5.0,
     porosity=0.9,
-    # frozen_grad = 10,
-    # unfrozen_grad = 30,
     beta = 0.04,
     flow_speed = 0.1
     ):
     
     def get_wavelength(RHS, LHS_den_term):
+        """Numerically solves for kappa and then wavelength"""
 
-    # """Numerically solves for kappa and then wavelength
-    # """
         def f(kappa):
 
             LHS_num = kappa**(8/3)
-
             # LHS_den = (kappa**2 + ((C_f*rho_f*(Q_bar_calc-(beta*unfrozen_grad)))/(K_f*rho_w*L_curly)))**(0.5)
             LHS_den = (kappa**2 + ((LHS_den_term)))**(0.5)
-
             LHS = LHS_num / LHS_den
 
-            
             return LHS - RHS
-
 
         try:
             sol = optimize.root_scalar(f, bracket=[
@@ -81,43 +73,24 @@ def calc_one_wavelength(
     K_i = 2.220
 
     g = 9.8
-    visc = 8.9E-4
-    rho_l = 1000
-    
-    rho_u = rho_s*(1-porosity) + (rho_w * porosity)
     rho_f = rho_s*(1-porosity) + (rho_i * porosity)
-
-    C_u = C_s*(1-porosity) + (C_w * porosity)
     C_f = C_s*(1-porosity) + (C_i * porosity)
-
-    K_u = K_s*(1-porosity) + (K_w * porosity)
     K_f = K_s*(1-porosity) + (K_i * porosity)
     slope = np.tan(np.deg2rad(slope_deg))
 
     L_curly = 334E3 * porosity # Latent head of fusion modulated by porosity
-
-    C_f = C_s*(1-porosity) + (C_i * porosity)
-
-    K_f = K_s*(1-porosity) + (K_i * porosity)
-    
-    # print(f'Using flow speed {flow_speed}')
-    slope = np.tan(np.deg2rad(slope_deg))
-
-    L_curly = 334E3 * porosity # Latent head of fusion modulated by porosity
-
-    K_f = K_s*(1-porosity) + (K_i * porosity)
 
     # Calculate Q_bar, which is based on both
     Q_bar_calc = (flow_speed * rho_w * g * slope)
-
     growth_rate = (1/(rho_w*porosity*L_curly)) * (Q_bar_calc - (beta * unfrozen_grad))
 
     RHS = (2.0374 * (Q_bar_calc)) / (x_t**(2/3) * (K_f * frozen_grad))
     # print(f'Using RHS {RHS}')
     LHS_den_term = ((C_f*rho_f*(Q_bar_calc-(beta*unfrozen_grad)))/(K_f*rho_w*L_curly))
     wavelength = get_wavelength(RHS, LHS_den_term)
+
     return [wavelength, growth_rate]
-    # return wavelength
+
     
 def generate_correlated_random_field(Nx, Ny, l, seed):
     """
@@ -225,10 +198,20 @@ plt.grid(True)
 #%% Find wavelength and growth rate of these parameters
 
 wavelength, growth_rate = calc_one_wavelength(
-    slope_deg=slope_deg,
-    frozen_grad=dTdz,
-    unfrozen_grad=dTdz,
+    np.rad2deg(np.atan(0.2)), #slope_deg,
+    dTdz,
+    dTdz,
+    beta=0.04,
+    flow_speed=0.025,
     )
+    # slope_deg,
+    # frozen_grad,
+    # unfrozen_grad,
+    # x_t = 1600,
+    # porosity=0.9,
+    # beta = 0.04,
+    # flow_speed = 0.1
+
 
 print(f'Wavelength: {round(wavelength, 2)} meters')
 print(f'You can form it over: {round(1/(growth_rate * 3.15e7),3)} years')
@@ -244,11 +227,11 @@ zb = mg.add_zeros('aquifer_base__elevation', at='node')
 zwt = mg.add_zeros("water_table__elevation", at="node")
 
 # some parameters
-b = 0.5 # permeable thickness m
-r = 1.0e-7 # recharge rate (constant, uniform here) m/s
-ksat = 1e-2 # hydraulic conductivity (constant, uniform here) m/s
+b = 0.05 # permeable thickness m
+r = 1.0e-6 # recharge rate (constant, uniform here) m/s
+ksat = 1e-1 # hydraulic conductivity (constant, uniform here) m/s
 n = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
-S0 = 75 # W/m^2, peak solar irradiance
+S0 = 0.04*20 # W/m^2, peak solar irradiance
 rho_w = 1000 # kg/m^3
 g = 9.81 # m/s^2
 
@@ -260,8 +243,9 @@ z[:] = -a * y**2 + a * max(y)**2
 
 # generate a random field to perturb the base elevation
 lam = 5 # correlation length for the random field
-alpha = 0.1 # scaling factor for the random field
-zb[:] = z - b + alpha * generate_correlated_random_field(Ny, Nx, lam/dx * 2, 2142025).flatten()
+alpha = 0.005 # scaling factor for the random field
+# zb[:] = z - b + alpha * generate_correlated_random_field(Ny, Nx, lam/dx * 2, 2142025).flatten()
+zb[:] = z - b + alpha * np.random.randn(Ny, Nx).flatten()
 zb0 = zb.copy()
 zwt[:] = zb + b # start water table at the surface
 
@@ -356,15 +340,9 @@ plt.figure()
 imshow_grid(mg, Q_node, cmap='plasma')
 plt.title('Q_node')
 
-# plot_average_psd(Q_node.reshape(mg.shape), fs=1.0)
-# plot_average_psd(zb0.reshape(mg.shape), fs=1.0)
-# q = mg.at_node['surface_water__specific_discharge']
-# plot_average_psd(q.reshape(mg.shape), fs=1.0)
-
-
 # %% Test Simple Hillslope Evolution Model
 
-T = 90*24*3600
+T = 180*24*3600
 dt = 3600*6
 N = T//dt
 
@@ -386,7 +364,7 @@ for i in tqdm(range(N)):
     hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(mg, gdp._hydr_grad)
     Q_node = Q_coeff * np.abs(vel_x * hydgr_x + vel_y * hydgr_y)
 
-    melt_depth = const_melt_rate(S0=75, Q=Q_node) * dt # use the function initialized at the beginning
+    melt_depth = const_melt_rate(S0=S0, Q=Q_node) * dt # use the function initialized at the beginning
     zb[mg.core_nodes] = zb[mg.core_nodes] - melt_depth[mg.core_nodes] # subtract melt depth from zb (melt depth is positive when the active layer is deepening)
 
     #if zb > z (profile is entirely frozen) then make it equal to z
@@ -430,3 +408,17 @@ plt.title('Active Zone Change')
 plt.figure()
 imshow_grid(mg, gwf0 - gwf, cmap='plasma')
 plt.title('Change in Groundwater Flux at Node')
+
+# %%
+
+plt.figure()
+imshow_grid(mg, gwf/(z-zb), cmap='plasma')
+plt.title('Groundwater Flux at Node')
+
+# plot_average_psd(zb0.reshape(mg.shape), fs=1.0)
+# plot_average_psd(zb.reshape(mg.shape), fs=1.0)
+# plot_average_psd((gwf-gwf0).reshape(mg.shape), fs=1.0)
+# q = mg.at_node['surface_water__specific_discharge']
+# plot_average_psd(q.reshape(mg.shape), fs=1.0)
+
+# %%
