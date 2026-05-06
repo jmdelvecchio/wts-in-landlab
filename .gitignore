@@ -1,3 +1,5 @@
 *.pdf
 *.xlsx
 heating.ipynb
+*.pyc
+__pycache__/
