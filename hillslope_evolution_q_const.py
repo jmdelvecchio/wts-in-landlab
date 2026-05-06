@@ -69,7 +69,7 @@ def calc_one_wavelength(
     C_i = 2050
 
     K_w = 0.598 # W/m·K 
-    K_s = 1.460 * 5
+    K_s = 1.460 #* 5 # not sure what this 5 is doing here. 
     K_i = 2.220
 
     g = 9.8
@@ -145,7 +145,7 @@ def plot_average_psd(arr, fs=1.0):
 def const_melt_rate(
                 S0=350,
                 L=334E3,
-                n=0.9,
+                phi=0.9,
                 Ks=2.73, 
                 dTdz=-20.0, 
                 Q=0,
@@ -156,7 +156,7 @@ def const_melt_rate(
     Parameters:
     S0 : peak solar irradiance (W/m^2) -- but may want to set this lower to account for insulation
     L : latent heat of fusion (J/kg)
-    n : porosity of the soil (dimensionless)
+    phi : porosity of the soil (dimensionless)
     Ks : thermal conductivity of frozen soil (W/m*K)
     dTdz : temperature gradient in the frozen soil (K/m)
     Q : internal heat dissipation (W/m^2)
@@ -169,7 +169,7 @@ def const_melt_rate(
     # Convert energy flux to melt rate in meters per second
     # PLus or minus if you care about this "melt factor" fudge
     # melt_rate_per_second = (energy_flux / (L) * melt_factor
-    melt_rate_per_second = (energy_flux / (L*n*rho_ice))#* melt_factor
+    melt_rate_per_second = (energy_flux / (L*phi*rho_ice))#* melt_factor
 
     return melt_rate_per_second
 
@@ -204,50 +204,83 @@ wavelength, growth_rate = calc_one_wavelength(
     beta=0.04,
     flow_speed=0.025,
     )
-    # slope_deg,
-    # frozen_grad,
-    # unfrozen_grad,
-    # x_t = 1600,
-    # porosity=0.9,
-    # beta = 0.04,
-    # flow_speed = 0.1
-
 
 print(f'Wavelength: {round(wavelength, 2)} meters')
 print(f'You can form it over: {round(1/(growth_rate * 3.15e7),3)} years')
 
+#%%
+xslope_var_all = []
 #%% Create the grid, add basic fields
 
 boundaries = {"top": "open", "left": "closed", "bottom": "closed", "right": "closed"}
 
-Nx = 101; Ny = 200; dx = 5
+Nx = 101; Ny = 200; dx = 10
 mg = RasterModelGrid((Ny,Nx), xy_spacing=dx, bc=boundaries)
 z = mg.add_zeros('topographic__elevation', at='node')
 zb = mg.add_zeros('aquifer_base__elevation', at='node')
 zwt = mg.add_zeros("water_table__elevation", at="node")
 
 # some parameters
-b = 0.05 # permeable thickness m
+b = 10 # permeable thickness m
 r = 1.0e-6 # recharge rate (constant, uniform here) m/s
 ksat = 1e-1 # hydraulic conductivity (constant, uniform here) m/s
-n = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
+phi = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
 S0 = 0.04*20 # W/m^2, peak solar irradiance
 rho_w = 1000 # kg/m^3
 g = 9.81 # m/s^2
 
+# thermal conductivities:
+kf = 2.0 # W/m/K, frozen soil
+ku = 0.5 # W/m/K, unfrozen soil
+
+# other parameters
+Tm = 0 # C, melting temperature
+L = 334E3 # J/kg, latent heat of fusion
+
+# constants for now
+frozen_gradient = -20 # -20 # K/m, temperature gradient in the frozen soil (constant for now)
+T_surface = 0 #-5 # C, surface temperature (constant for now)
+
 # some example parabolic hillslope, just made up
 x = mg.x_of_node
 y = mg.y_of_node
-a = 0.0002
+a = 0.00005
 z[:] = -a * y**2 + a * max(y)**2
+
+# calc average slope of hillslope
+slope = np.arctan(np.mean(np.abs(np.gradient(z.reshape(mg.shape), dx, axis=0))))
+slope_deg = np.rad2deg(slope)
+print(f'Average slope of hillslope is {round(slope_deg, 2)} degrees')
+
+# calc theoretical wavelength and growth rate for these parameters
+wavelength, growth_rate = calc_one_wavelength(
+    slope_deg,
+    frozen_gradient,
+    ku * (T_surface - Tm) / b, # use the conductive flux to
+    x_t = max(mg.y_of_node), # use the length of the hillslope as the characteristic length scale
+    porosity=phi,
+    beta = 0.04,
+    flow_speed = ksat*slope # m/s, just a guess for now
+    )
+print(f'Wavelength: {round(wavelength, 2)} meters')
+print(f'Growth rate: {3600*24*365*growth_rate:.2e} meters/year')
+
+
+#%%
 
 # generate a random field to perturb the base elevation
 lam = 5 # correlation length for the random field
-alpha = 0.005 # scaling factor for the random field
+alpha = 0.05 # scaling factor for the random field
 # zb[:] = z - b + alpha * generate_correlated_random_field(Ny, Nx, lam/dx * 2, 2142025).flatten()
 zb[:] = z - b + alpha * np.random.randn(Ny, Nx).flatten()
+
+# wavelength_target = round(wavelength, 2)*2.0  # meters
+# kappa = 2 * np.pi / wavelength_target
+# amplitude = 0.01  # small perturbation, meters
+# zb[:] = z - b + amplitude * np.sin(kappa * mg.x_of_node)
+
 zb0 = zb.copy()
-zwt[:] = zb + b # start water table at the surface
+zwt[:] = zb + 0.1 # near equilibrium thickness
 
 # overview plots
 fig, axes = plt.subplots(1, 3, figsize=(12, 5))
@@ -266,14 +299,6 @@ axes[2].set_title('Active Zone Thickness')
 plt.tight_layout()
 plt.show()
 
-# 3D plot of the hillslope
-# fig, ax = plt.subplots(subplot_kw={"projection": "3d"})
-# X = x.reshape(mg.shape)
-# Y = y.reshape(mg.shape)
-# Z = z.reshape(mg.shape)
-# # Plot the surface.
-# surf = ax.plot_surface(X, Y, Z, cmap='pink',
-#                        linewidth=0, antialiased=False)
 
 #%% Initialize components
 
@@ -282,7 +307,7 @@ gdp = GroundwaterDupuitPercolator(
     mg,
     recharge_rate=r,
     hydraulic_conductivity=ksat,
-    porosity=n,
+    porosity=phi,
     regularization_f=0.1,
 )
 
@@ -297,12 +322,30 @@ while diff > tol:
     print(diff)
 gwf0 = gdp.calc_gw_flux_at_node() # map groundwater flux to node (easier to plot)
 
+
+#%% Calc Q and plot
+
 # calculate internal heating factor Q
 Q_coeff = rho_w * g # convert from head gradient to pressure gradient 
 vel_x, vel_y = map_link_vector_components_to_node_raster(mg, gdp._vel) # get mean value in x and y directions at node
 hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(mg, gdp._hydr_grad)
 Q_node = Q_coeff * np.abs(vel_x * hydgr_x + vel_y * hydgr_y) # absolute value of the dot product, as in the model description
 
+q_x, q_y = map_link_vector_components_to_node_raster(mg, gdp._q) # get mean value in x and y directions at node
+Q_node_alt = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) # should be the same as above, just using q instead of vel*hydr
+# cross_slope_mean_thickness = np.broadcast_to(np.mean((zwt-zb).reshape(mg.shape), axis=1)[:,np.newaxis], mg.shape) # mean thickness in cross slope direction
+# Q_node_alt = Q_node_alt / cross_slope_mean_thickness.flatten() # convert from W/m^2 to W/m^3 by dividing by thickness of active layer
+# Q_node_alt = Q_node_alt / np.mean(zwt-zb) # convert from W/m^2 to W/m^3 by dividing by thickness of active layer
+
+
+# Q (heat source) rate
+plt.figure()
+imshow_grid(mg, Q_node, cmap='plasma')
+plt.title('Q_node')
+
+plt.figure()
+imshow_grid(mg, Q_node_alt, cmap='plasma')
+plt.title('Q_node_alt')
 
 # %% Some figures
 
@@ -310,20 +353,6 @@ Q_node = Q_coeff * np.abs(vel_x * hydgr_x + vel_y * hydgr_y) # absolute value of
 plt.figure()
 imshow_grid(mg, gwf0, cmap='plasma')
 plt.title('Groundwater Flux at Node')
-
-# local produced runoff
-plt.figure()
-imshow_grid(mg, 'surface_water__specific_discharge', cmap='viridis')
-plt.title('Local Runoff')
-
-# saturated thickness
-plt.figure()
-imshow_grid(mg, (zwt-zb)/(z-zb), cmap='Blues')
-plt.title('Relative Saturated Thickness')
-
-# These plots make it clear why Q_node remains so uniform: the flux is dominated by
-# the downslope direction, which is not really affected by perturbations. Cross slope
-# gradients are much smaller, don't really appear when added together.
 
 # x velocity
 plt.figure()
@@ -335,22 +364,38 @@ plt.figure()
 imshow_grid(mg, vel_y, cmap='Blues')
 plt.title('Vel_y')
 
-# Q (heat source) rate
+# local produced runoff
 plt.figure()
-imshow_grid(mg, Q_node, cmap='plasma')
-plt.title('Q_node')
+imshow_grid(mg, 'surface_water__specific_discharge', cmap='viridis')
+plt.title('Local Runoff')
+
+# saturated thickness
+plt.figure()
+imshow_grid(mg, (zwt-zb)/(z-zb), cmap='Blues')
+plt.title('Relative Saturated Thickness')
+
+print(f'Median aquifer thickness is {np.median(zwt-zb)} meters')
+print(f'Mean aquifer thickness is {np.mean(zwt-zb)} meters')
+
+# These plots make it clear why Q_node remains so uniform: the flux is dominated by
+# the downslope direction, which is not really affected by perturbations. Cross slope
+# gradients are much smaller, don't really appear when added together.
 
 # %% Test Simple Hillslope Evolution Model
 
 T = 180*24*3600
 dt = 3600*6
 N = T//dt
+Q_method = 'q'
 
+h = mg.at_node['aquifer__thickness'] 
+
+xslope_var = np.zeros(N)
 for i in tqdm(range(N)):
 
     # run groundwater model to get steady state solution
     diff = 1
-    tol = 1e-10
+    tol = 1e-8
     iter = 0
     while diff > tol and iter < 20:
         zwt0 = zwt.copy()
@@ -359,43 +404,71 @@ for i in tqdm(range(N)):
         iter += 1
         # print(diff)
 
-    # calculate Q with the actual darcy velocity *  hydraulic gradient
-    vel_x, vel_y = map_link_vector_components_to_node_raster(mg, gdp._vel) # get mean value in x and y directions at node
-    hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(mg, gdp._hydr_grad)
-    Q_node = Q_coeff * np.abs(vel_x * hydgr_x + vel_y * hydgr_y)
+    if Q_method == 'q':
+        # alternative way to calculate Q with averaged q 
+        q_x, q_y = map_link_vector_components_to_node_raster(mg, gdp._q) # get mean value in x and y directions at node
+        Q_node_alt = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) # should be the same as above, just using q instead of vel*hydr
+        # Q_node = Q_node_alt / np.mean(zwt-zb, axis=0) # convert from W/m^2 to W/m^3 by dividing by thickness of active layer
+        Q_node = Q_node_alt
+    else:
+        # calculate Q with the actual darcy velocity *  hydraulic gradient
+        vel_x, vel_y = map_link_vector_components_to_node_raster(mg, gdp._vel) # get mean value in x and y directions at node
+        hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(mg, gdp._hydr_grad)
+        Q_node = Q_coeff * np.abs(vel_x * hydgr_x + vel_y * hydgr_y)
 
-    melt_depth = const_melt_rate(S0=S0, Q=Q_node) * dt # use the function initialized at the beginning
-    zb[mg.core_nodes] = zb[mg.core_nodes] - melt_depth[mg.core_nodes] # subtract melt depth from zb (melt depth is positive when the active layer is deepening)
+    # Background flux terms (uniform, just set the mean thaw rate)
+    flux_solar = ku * (T_surface - Tm) / b  # uniform with b as thickness of the active layer
+    flux_frozen = kf * frozen_gradient  # uniform background
 
-    #if zb > z (profile is entirely frozen) then make it equal to z
-    if (zb > z).any():
-        zb[zb > z] = z[zb > z] - 1e-3
-        print('oh no zb > z setting it to z - delta <3')
+    # Spatially variable term - this is where the instability lives
+    flux_dissipation = Q_node  # varies with local flow conditions
 
-    zwt[mg.core_nodes] = (zb + melt_depth + gdp._thickness)[mg.core_nodes] # update water table elevation (assume melted zone is fully saturated)
+    # Interface velocity
+    dzb_dt = (flux_solar + flux_frozen + flux_dissipation) / (rho_w * phi * L) # flux frozen added because value is negative, so it reduces the melt rate
+    zb[:] = zb - dzb_dt * dt # note this also updates the boundary condition for the groundwater model, which is important for the feedback to work
+    # zwt keeps same position, aquifer adds water from deepening of permafrost table, so thickness increases by the melt depth
+    h[:] = (zwt - zb) # update aquifer thickness
+
+    # cross slope variability metric
+    signal = np.std(zb.reshape(mg.shape), axis=1).mean()
+    xslope_var[i] = signal
+
+    # #if zb > z (profile is entirely frozen) then make it equal to z
+    # if (zb > z).any():
+    #     zb[zb > z] = z[zb > z] - 1e-3
+    #     print('oh no zb > z setting it to z - delta <3')
 
     if i % 100 == 0:
         f = zb - zb0
-        # f = zwt0-zwt
-        # plt.figure()
-        # imshow_grid(mg, f, colorbar_label='zb-zb0', cmap='viridis')
-        # axes[2].set_title(f'zb-zb0 at timestep {i}')
-        print(f'Max melt at timestep {i} is {np.max(melt_depth)}')
-        print(f'Max zb-zb0 at timestep {i} is {np.max(f)}')
-        print(f'Max Q_node at timestep {i} is {np.max(Q_node)}')
+
+        tqdm.write(f'Max melt at timestep {i} is {np.max(dzb_dt * dt)} meters')
+        tqdm.write(f'Max zb-zb0 at timestep {i} is {np.max(f)}')
+        tqdm.write(f'Max Q_node at timestep {i} is {np.max(Q_node)}')
 
 # %%
 
+# along-slope only (base state)
+u_along = np.mean(np.abs(vel_y))
+
+# cross-slope perturbation amplitude
+u_cross = np.std(vel_x.reshape(mg.shape), axis=0).mean()
+
+print(f'Along-slope mean velocity: {u_along:.2e} m/s')
+print(f'Cross-slope perturbation velocity: {u_cross:.2e} m/s')
+
+#%% Plots
+
 f = zb - zb0
-# f = zwt0-zwt
-
-gwf = gdp.calc_gw_flux_at_node() # map groundwater flux to node (easier to plot)
-
 fg = f.reshape(mg.shape)
+gwf = gdp.calc_gw_flux_at_node() # map groundwater flux to node (easier to plot)
 
 plt.figure()
 for i in range(0,200,20):
     plt.plot(fg[i,1:-1])
+
+plt.figure()
+imshow_grid(mg, zb, colorbar_label='z-zb', cmap='viridis')
+plt.title('Base Elevation of Active Zone')
 
 plt.figure()
 imshow_grid(mg, z-zb, colorbar_label='z-zb', cmap='viridis')
@@ -409,10 +482,43 @@ plt.figure()
 imshow_grid(mg, gwf0 - gwf, cmap='plasma')
 plt.title('Change in Groundwater Flux at Node')
 
+#%%
+# hydraulic gradient at node
+hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(mg, gdp._hydr_grad)
+hydgr_mag = np.sqrt(hydgr_x**2 + hydgr_y**2)
+plt.figure()
+imshow_grid(mg, hydgr_mag, cmap='plasma')
+plt.title('Hydraulic Gradient Magnitude at Node')
+
+vel_x, vel_y = map_link_vector_components_to_node_raster(mg, gdp._vel) # get mean value in x and y directions at node
+vel_mag = np.sqrt(vel_x**2 + vel_y**2)
+plt.figure()
+imshow_grid(mg, vel_mag, cmap='plasma')
+plt.title('Velocity Magnitude at Node')
+
+# groundwater flux, mapped from links to nodes
+plt.figure()
+imshow_grid(mg, gwf, cmap='plasma')
+plt.title('Groundwater Flux at Node')
+
+
+#%%
+t = np.arange(N) * dt
+plt.figure()
+plt.plot(t, xslope_var)
+plt.xlabel('Time (s)')
+plt.ylabel('Mean Std Dev of zb in Cross Slope Direction')
+
 # %%
 
+# Q (heat source) rate
 plt.figure()
-imshow_grid(mg, gwf/(z-zb), cmap='plasma')
+imshow_grid(mg, Q_node, cmap='plasma')
+plt.title('Q_node')
+
+
+plt.figure()
+imshow_grid(mg, gwf/h, cmap='plasma')
 plt.title('Groundwater Flux at Node')
 
 # plot_average_psd(zb0.reshape(mg.shape), fs=1.0)
@@ -421,4 +527,24 @@ plt.title('Groundwater Flux at Node')
 # q = mg.at_node['surface_water__specific_discharge']
 # plot_average_psd(q.reshape(mg.shape), fs=1.0)
 
+# %%
+
+
+xslope_var_all.append(xslope_var)
+# %%
+
+
+run_names = ['0.5x wavelength', '1x wavelength', '2x wavelength']
+plt.figure()
+for i, xslope_var in enumerate(xslope_var_all):
+    plt.plot(t, xslope_var, label=run_names[i])
+plt.xlabel('Time (s)')
+plt.ylabel('Mean Std Dev of zb in Cross Slope Direction')
+plt.legend()
+# %%
+
+plt.figure()
+plt.subplot(1, 3, 2)
+imshow_grid(mg, Q_node, cmap='plasma', colorbar_label='Dissipation (W/m^2)')
+plt.colorbar(ax=plt.gca(),label='Dissipation (W/m^2)')
 # %%
