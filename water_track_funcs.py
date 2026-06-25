@@ -10,6 +10,49 @@ from scipy.signal import welch
 import numpy as np
 from scipy import optimize
 
+def calc_wavelenth_1(xt, kf, frozen_grad, rho_w, slope, hydraulic_conductivity):
+    """
+    Calculates the wavelength of a water track based on the given parameters.
+
+    xt (float): The hillslope length
+    kf (float): The thermal conductivity of the frozen soil.
+    frozen_grad (float): The gradient of the frozen layer.
+    rho_w (float): The density of water.
+    slope (float): The slope of the terrain.
+    hydraulic_conductivity (float): The hydraulic conductivity of the soil.
+
+    Returns:
+    float: The wavelength of the water track.
+    """ 
+    frozen_grad = abs(frozen_grad)
+    sint = np.sin(np.deg2rad(slope))
+    U = hydraulic_conductivity * sint # approximateion of darcy flux
+
+    return 2 * np.pi * xt * ((kf*frozen_grad)/(1.358 * rho_w * 9.81 * sint * U * xt))**(3/5)
+
+def calc_growth_rate_1(xt, kf, L, frozen_grad, rho_w, rho_u, theta, slope, hydraulic_conductivity):
+    """
+    Calculates the growth rate of a water track based on the given parameters.
+
+    xt (float): The hillslope length
+    kf (float): The thermal conductivity of the frozen soil.
+    L (float): The latent heat of freezing
+    frozen_grad (float): The gradient of the frozen layer.
+    rho_w (float): The density of water.
+    rho_u: The density of the unfrozen soil
+    slope (float): The slope of the terrain.
+    hydraulic_conductivity (float): The hydraulic conductivity of the soil.
+
+    Returns:
+    float: The growth rate of the water track.
+    """
+    frozen_grad = abs(frozen_grad)
+    sint = np.sin(np.deg2rad(slope))
+    U = hydraulic_conductivity * sint # approximateion of darcy flux
+    g = 9.81
+
+    return (rho_w * g * sint * U) / (rho_u * theta * L) * (1 - 2.991*((kf * frozen_grad)/(rho_w*g*sint*U*xt))**(2/5))
+
 def calc_one_wavelength(
     slope_deg,
     frozen_grad,
