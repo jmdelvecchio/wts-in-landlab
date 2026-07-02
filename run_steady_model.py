@@ -2,6 +2,7 @@
 Script to run the water track model in steady configuration
 """
 #%%
+import shutil
 import numpy as np
 from scipy import signal
 import matplotlib.pyplot as plt
@@ -36,11 +37,21 @@ params['ku'] = 1.2682 # W/m/K, unfrozen soil
 params['Tm'] = 0 # C, melting temperature
 params['L'] = 334E3 # J/kg, latent heat of fusion
 params['frozen_gradient'] = -20 # -20 # K/m, temperature gradient in the frozen soil (constant for now)
-params['T_surface'] = 1 #0 #-5 # C, surface temperature (constant for now)
-params['T_air'] = 5
+params['T_surface'] = 0 #0 #-5 # C, surface temperature (constant for now)
+params['T_air'] = 1
 params['dt'] = 6*3600 # seconds
-params['T'] = 365 * 24 * 3600
+params['T'] = 180 * 24 * 3600
 params['steady'] = False # whether to run the groundwater model to steady state or not
+
+output = {}
+output["output_interval"] = 20
+output["output_fields"] = [
+        "at_node:aquifer_base__elevation",
+        "at_node:water_table__elevation",
+        ]
+output["base_output_path"] = '/Users/tuv05476/Documents/Research Data/Local/water-tracks/wtm_steady_'
+output["run_id"] = 0 #make this task_id if multiple runs
+
 
 ## Introduce random fluctuations to base elevation to seed water track formation
 lam = 5 # correlation length for the random field
@@ -52,19 +63,6 @@ fluct = alpha * np.random.randn(Ny, Nx).flatten()
 slope = np.arctan(np.mean(np.abs(np.gradient(z.reshape(mg.shape), dx, axis=0))))
 slope_deg = np.rad2deg(slope)
 print(f'Average slope of hillslope is {round(slope_deg, 2)} degrees')
-
-# calc theoretical wavelength and growth rate for these parameters
-# wavelength, growth_rate = calc_one_wavelength(
-#     slope_deg,
-#     params['frozen_gradient'],
-#     params['ku'] * (params['T_surface'] - params['Tm']) / b, # use the conductive flux to
-#     x_t = max(mg.y_of_node), # use the length of the hillslope as the characteristic length scale
-#     porosity=params['porosity'],
-#     beta=params['S0'], # not sure about this
-#     flow_speed = params['hydraulic_conductivity']*slope # m/s, just a guess for now
-#     )
-# print(f'Wavelength: {round(wavelength, 2)} meters')
-# print(f'Growth rate: {3600*24*365*growth_rate:.2e} meters/year')
 
 rho_w = 1000
 rho_s = 2600
@@ -101,7 +99,11 @@ plt.show()
 
 #%%
 
-mdl = WaterTrackModel(mg, params)
+# copy scripts to output location
+shutil.copy('./water_track_model.py', output['base_output_path'] + f"water_track_model_{output['run_id']}.py")
+shutil.copy('./run_steady_model.py', output['base_output_path'] + f"run_steady_model_{output['run_id']}.py")
+
+mdl = WaterTrackModel(mg, params, output_dict=output)
 if params['steady']:
     mdl.run_hydrology_steady()
 else:
@@ -148,28 +150,3 @@ for i in range(N):
 plt.xlabel('Length (m)')
 plt.ylabel('Power/Frequency (m^2 / 1/m)')
 plt.show()
-
-
-
-
-
-# %%
-
-# 1. Generate a dummy signal (Sampling rate: 1000 Hz, Duration: 2 seconds)
-fs = 1000.0
-time = np.arange(0, 2, 1/fs)
-# Signal contains 50 Hz and 120 Hz sinusoids, plus random noise
-signal_data = np.sin(2 * np.pi * 50 * time) + np.sin(2 * np.pi * 120 * time) + np.random.normal(scale=2, size=len(time))
-
-# 2. Calculate Power Spectral Density using Welch's method
-frequencies, psd = signal.welch(signal_data, fs, nperseg=1024)
-
-# 3. Plot the results
-plt.figure(figsize=(10, 4))
-plt.semilogy(frequencies, psd) # Logarithmic scale for better dynamic range
-plt.title('Power Spectral Density (PSD)')
-plt.xlabel('Frequency (Hz)')
-plt.ylabel('Power/Frequency (V^2 / Hz)')
-plt.grid(True)
-
-# %%
