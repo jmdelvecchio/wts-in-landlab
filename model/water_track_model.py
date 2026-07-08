@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from landlab import imshow_grid
 from landlab.components import GroundwaterDupuitPercolator
 from landlab.grid.raster_mappers import map_link_vector_components_to_node_raster
-from landlab.grid.mappers import map_mean_of_link_nodes_to_link
+from landlab.grid.mappers import map_mean_of_link_nodes_to_link, map_value_at_max_node_to_link
 
 from DupuitLEM.io import (
     initialize_output_dataset,
@@ -73,8 +73,8 @@ class WaterTrackModel:
         self._z = self._grid.at_node['topographic__elevation']
         self._zb = self._grid.at_node['aquifer_base__elevation']
         self._zwt = self._grid.at_node['water_table__elevation']
+        self._T_mean = self._grid.at_node['mean_unfrozen__temperature']
         self._Qdiss = self._grid.add_zeros('node', 'thermal_dissipation')
-        self._T_mean = self._grid.add_zeros('node', 'mean_unfrozen__temperature')
         self._h = self._grid.add_zeros('node', 'aquifer_thickness')
         self._dzb_dt = np.zeros_like(self._zb) # initialize melt rate for use in correction term
         self._b = self._z - self._zb # initialize active layer thickness for use in correction term
@@ -177,16 +177,19 @@ class WaterTrackModel:
         remaining_time = self.dt
         self._num_substeps = 0
         dz = np.zeros_like(self._zb) # sum up the melt at each subtimestep
+        grad_T = np.zeros_like(self._grid.length_of_link)
         while remaining_time > 0:
 
             # Lateral diffusion: div (ku b gradT) [W/m2]
-            grad_T = self._grid.calc_grad_at_link(self._T_mean)             # K/m at links
+            grad_T[self._grid.active_links] = self._grid.calc_grad_at_link(self._T_mean)[self._grid.active_links]            # K/m at links
             b_at_link = map_mean_of_link_nodes_to_link(self._grid, self._b) # m at links
+            # b_at_link = map_value_at_max_node_to_link(self._grid, self._b, self._b) # m at links
             diff_flux = self.k_u * b_at_link * grad_T                       # W/m at links
             lateral_diffusion = self._grid.calc_flux_div_at_node(diff_flux) # W/m2 at nodes
 
             # Lateral advection: q gradT = div (Tq) - T(div q) [K m/s at nodes]
-            T_at_link = map_mean_of_link_nodes_to_link(self._grid, self._T_mean)  # K at links
+            # T_at_link = map_mean_of_link_nodes_to_link(self._grid, self._T_mean)  # K at links
+            T_at_link = map_value_at_max_node_to_link(self._grid, self._zwt, self._T_mean)  # K at links
             adv_flux = T_at_link * self.gdp._q                                    # K m2/s at links
             flux_div_Tq = self._grid.calc_flux_div_at_node(adv_flux)               # K m/s at nodes
             flux_div_q = self._grid.calc_flux_div_at_node(self.gdp._q)             # m/s at nodes
@@ -204,9 +207,9 @@ class WaterTrackModel:
             dt_courant = self._courant_coefficient * np.min(
                 np.divide(
                     self._grid.length_of_link,
-                    abs(self._vel), # leave out division by porosity? 
-                    where=abs(self._vel) > 0,
-                    out=np.ones_like(self._vel) * 1e15,
+                    abs(self.gdp._vel), # leave out division by porosity? 
+                    where=abs(self.gdp._vel) > 0,
+                    out=np.ones_like(self.gdp._vel) * 1e15,
                 )
             )
             substep_dt = min([dt_courant, remaining_time])

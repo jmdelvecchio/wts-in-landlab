@@ -60,19 +60,18 @@ def make_model(grid, dt=3600.0, **overrides):
     m._b             = np.ones(nn)    # 1 m active layer
     m._zb            = np.zeros(nn)
     m._z             = np.ones(nn)
+    m._zwt           = np.ones(nn)
     m._Qdiss         = np.zeros(nn)
     m._dzb_dt        = np.zeros(nn)
     m.melt_diffusion = np.zeros(nn)
 
-    # link arrays
-    # zero velocity → dt_courant → inf → single substep per call
-    m._vel = np.zeros(nl)
-
-    # minimal GDP mock: only _q is accessed by run_heat_transport
+    # minimal GDP mock: _q is used for heat flux in run_heat_transport,
+    # _vel is used in courant condition.
     class _GDP:
         pass
     m.gdp     = _GDP()
     m.gdp._q  = np.zeros(nl)   # no lateral flow
+    m.gdp._vel = np.zeros(nl)
 
     # apply per-test overrides
     for key, val in overrides.items():
@@ -367,8 +366,8 @@ def test_peclet_profile():
     # Uniform upward flow: depth-integrated flux q = u * b on vertical links
     m.gdp._q[:] = 0.0
     m.gdp._q[mg.vertical_links] = u * b_val
-    m._vel[:] = 0.0
-    m._vel[mg.vertical_links] = u    # Courant condition: dt_c = 0.5*dx/u = 2.5 s
+    m.gdp._vel[:] = 0.0
+    m.gdp._vel[mg.vertical_links] = u    # Courant condition: dt_c = 0.5*dx/u = 2.5 s
 
     for _ in range(1000):
         _run(m)

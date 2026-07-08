@@ -11,13 +11,13 @@ from scipy import signal
 import matplotlib.pyplot as plt
 
 from landlab import RasterModelGrid, imshow_grid
-from scripts.water_track_funcs import calc_growth_rate_1, calc_wavelenth_1
+from water_track_funcs import calc_growth_rate_1, calc_wavelenth_1
 from model.water_track_model import WaterTrackModel
 
 #%%
 # grid and initial conditions
 boundaries = {"top": "open", "left": "closed", "bottom": "closed", "right": "closed"}
-Nx = 201; Ny = 400; dx = 5
+Nx = 101; Ny = 200; dx = 5
 mg = RasterModelGrid((Ny,Nx), xy_spacing=dx, bc=boundaries)
 z = mg.add_zeros('topographic__elevation', at='node')
 zb = mg.add_zeros('aquifer_base__elevation', at='node')
@@ -33,7 +33,7 @@ zb[:] = z - b
 
 params = {}
 params['recharge_rate'] = 1.0e-6 # recharge rate (constant, uniform here) m/s
-params['hydraulic_conductivity'] = 1e-1 # hydraulic conductivity (constant, uniform here) m/s
+params['hydraulic_conductivity'] = 1e-2 # hydraulic conductivity (constant, uniform here) m/s
 params['porosity'] = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
 params['S0'] = 10 # W/m^2, peak solar irradiance
 
@@ -41,6 +41,7 @@ params['frozen_gradient'] = -20 # -20 # K/m, temperature gradient in the frozen 
 params['T_air'] = 1
 params['dt'] = 6*3600 # seconds
 params['T'] = 180 * 24 * 3600
+params['courant_coefficient'] = 0.1
 # params['gwdt'] = 1e3 # seconds, groundwater model timestep 
 # params['tol'] = 1e-10 # tolerance for numerical solvers
 # params['max_iter'] = 20 # maximum iterations for numerical solvers
@@ -128,7 +129,7 @@ plt.show()
 #%%
 
 # copy scripts to output location
-shutil.copy('./water_track_model.py', output['base_output_path'] + f"water_track_model_{output['run_id']}.py")
+shutil.copy('../model/water_track_model.py', output['base_output_path'] + f"water_track_model_{output['run_id']}.py")
 shutil.copy('./run_steady_model.py', output['base_output_path'] + f"run_steady_model_{output['run_id']}.py")
 
 # mdl = WaterTrackModel(mg, params, output_dict=output)
@@ -149,6 +150,12 @@ mdl.make_plots()
 plt.figure(figsize=(15,5))
 plt.subplot(1, 3, 2)
 imshow_grid(mg, mdl.melt_diffusion, cmap='plasma', colorbar_label='Melt diffusion rate (m/s)')
+
+#%%
+
+plt.figure(figsize=(15,5))
+plt.subplot(1, 3, 2)
+imshow_grid(mg, mdl._T_mean, cmap='plasma', colorbar_label='Temperature (C)')
 
 # %%
 plt.figure(figsize=(15,5))
