@@ -30,15 +30,19 @@ class WaterTrackModel:
         # Initialize other model components here (e.g., groundwater flow, erosion)
         
         self.S0 = params.get('S0', 0.04) # 0.04 W/m^2, peak solar irradiance
-        # thermal conductivities:
-        self.kf = params.get('kf', 2.0) # 2.0 W/m/K, frozen soil
-        self.ku = params.get('ku', 0.5) # 0.5 W/m/K, unfrozen soil
+        self.k_f = params.get('kf', 2.728) # 2.0 W/m/K, frozen soil
+        self.k_u = params.get('ku', 1.2682) # 0.5 W/m/K, unfrozen soil
         self.beta = params.get('beta', 0.04) # insulation parameter (W/m^2 K)
         self.frozen_gradient = params.get('frozen_gradient', -20) # -20 # K/m, temperature gradient in the frozen soil (constant for now)
-        self.T_surface = params.get('T_surface', 0) # C, surface temperature (constant for now)
         self.T_air = params.get('T_air', 0) # C, air temperature (constant for now)
         self.rho_w = params.get('rho_w', 1000) # kg/m^3
+        self.rho_s = params.get('rho_s', 2600) # kg/m^3
+        self.C_s = params.get('C_s', 800) # J/kg/K, specific heat capacity of soil
+        self.C_w = params.get('C_w', 4.2e3) # J/kg/K, specific heat capacity of water at ~5C
         self.phi = params.get('porosity', 0.9) # porosity
+
+        self.C_u = self.phi * self.C_w + (1 - self.phi) * self.C_s # J/kg/K, unfrozen specific heat capacity 
+        self.rho_u = self.phi * self.rho_w + (1 - self.phi) * self.rho_s # kg/m^3, unfrozen density
         
         self.g = params.get('g', 9.81) # m/s^2
         self.Tm = params.get('Tm', 0) # C, melting temperature
@@ -52,6 +56,10 @@ class WaterTrackModel:
         self.gwdt = params.get('gwdt', 1e3) # seconds, groundwater model timestep #TODO: make this adaptive based on convergence of groundwater model
         self.T = params.get('T', 180*24*3600) # seconds, total simulation time
         self.n_steps = int(self.T / self.dt) 
+        self._courant_coefficient = params.get('courant_coefficient', 0.5) # coefficient for advection in both gw model and thermal model
+
+        self.use_melt_diffusion = params.get('use_melt_diffusion', False)
+        self.use_steady_hydrology = params.get('use_steady_hydrology', False)
 
         self.gdp = GroundwaterDupuitPercolator(
                     self._grid,
@@ -60,17 +68,18 @@ class WaterTrackModel:
                     porosity=self.phi,
                     regularization_f=0.1,
                     # vn_coefficient=0.2
-                    # courant_coefficient=0.1
+                    courant_coefficient=self._courant_coefficient
                     )
         self._z = self._grid.at_node['topographic__elevation']
         self._zb = self._grid.at_node['aquifer_base__elevation']
         self._zwt = self._grid.at_node['water_table__elevation']
         self._Qdiss = self._grid.add_zeros('node', 'thermal_dissipation')
-        self._zb0 = self._zb.copy()
+        self._T_mean = self._grid.add_zeros('node', 'mean_unfrozen__temperature')
         self._h = self._grid.add_zeros('node', 'aquifer_thickness')
         self._dzb_dt = np.zeros_like(self._zb) # initialize melt rate for use in correction term
         self._b = self._z - self._zb # initialize active layer thickness for use in correction term
-        
+        self._zb0 = self._zb.copy()
+
         # configure outputs
         if output_dict:
             
@@ -133,8 +142,8 @@ class WaterTrackModel:
     
         hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(self._grid, self.gdp._hydr_grad)
         q_x, q_y = map_link_vector_components_to_node_raster(self._grid, self.gdp._q) # get mean value in x and y directions at node
-        self._Qdiss = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) # should be the same as above, just using q instead of vel*hydr
-        # self._Qdiss[:] = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) / np.mean(self._zwt - self._zb) # possibly wrong units?
+        self._Qdiss = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) # dissipated heat is rho_w g (q dot gradh)
+
 
     def run_hydrology_dynamic(self):
         """Run the groundwater flow model for a single timestep dt to get water table, fluxes, and dissipative heating."""
@@ -146,44 +155,121 @@ class WaterTrackModel:
     
         hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(self._grid, self.gdp._hydr_grad)
         q_x, q_y = map_link_vector_components_to_node_raster(self._grid, self.gdp._q) # get mean value in x and y directions at node
-        self._Qdiss = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) # should be the same as above, just using q instead of vel*hydr
-        # self._Qdiss[:] = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) / np.mean(self._zwt - self._zb) # possibly wrong units?
-      
+        self._Qdiss = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) # dissipated heat is rho_w g (q dot gradh)
+    
+
+    def run_heat_transport(self):
+        """
+        Update depth-averaged active layer temperature T_mean for one timestep dt.
+        Computes and stores dzb_dt via the Stefan condition for use in run_step().
+        
+        The depth-integrated heat equation is:
+        
+        dT/dt = (1/(Cu rho_u b)) * [div (ku b gradT) + Qdiss + BC_top - flux_unfrozen]
+                - (1/b) * [div (T q) - T div q]
+        
+        where the Stefan condition at the base gives dzb_dt.
+        """
+
+        # Heat flux into frozen layer (stabilizing, removes energy from interface)
+        flux_frozen = self.k_f * self.frozen_gradient  # W/m2
+    
+        remaining_time = self.dt
+        self._num_substeps = 0
+        dz = np.zeros_like(self._zb) # sum up the melt at each subtimestep
+        while remaining_time > 0:
+
+            # Lateral diffusion: div (ku b gradT) [W/m2]
+            grad_T = self._grid.calc_grad_at_link(self._T_mean)             # K/m at links
+            b_at_link = map_mean_of_link_nodes_to_link(self._grid, self._b) # m at links
+            diff_flux = self.k_u * b_at_link * grad_T                       # W/m at links
+            lateral_diffusion = self._grid.calc_flux_div_at_node(diff_flux) # W/m2 at nodes
+
+            # Lateral advection: q gradT = div (Tq) - T(div q) [K m/s at nodes]
+            T_at_link = map_mean_of_link_nodes_to_link(self._grid, self._T_mean)  # K at links
+            adv_flux = T_at_link * self.gdp._q                                    # K m2/s at links
+            flux_div_Tq = self._grid.calc_flux_div_at_node(adv_flux)               # K m/s at nodes
+            flux_div_q = self._grid.calc_flux_div_at_node(self.gdp._q)             # m/s at nodes
+            lateral_advection = flux_div_Tq - self._T_mean * flux_div_q           # K m/s at nodes
+
+            # Top boundary condition [W/m2]
+            # Solar/radiative forcing plus conductive exchange with atmosphere
+            BC_top = self.S0 + self.beta * (self.T_air - self._T_mean)
+
+            # Bottom boundary condition: heat flux from active layer to interface [W/m2]
+            # Linear approximation to temperature profile, T drops from T_mean to Tm over b/2
+            flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (self._b / 2)
+
+            # calculate courant minimum timestep
+            dt_courant = self._courant_coefficient * np.min(
+                np.divide(
+                    self._grid.length_of_link,
+                    abs(self._vel), # leave out division by porosity? 
+                    where=abs(self._vel) > 0,
+                    out=np.ones_like(self._vel) * 1e15,
+                )
+            )
+            substep_dt = min([dt_courant, remaining_time])
+
+            # Depth-averaged temperature update [K/s]
+            # Thermal terms scaled by 1/(Cu ρu b), advection scaled by 1/b
+            dT_dt = (
+                (1.0 / (self.C_u * self.rho_u * self._b)) * (
+                    lateral_diffusion    # W/m2 / (J/m3) = K/s
+                    + self._Qdiss        # dissipative heating, W/m2
+                    + BC_top             # surface flux, W/m2
+                    - flux_unfrozen      # heat lost to melting, W/m2
+                )
+                - (1.0 / self._b) * lateral_advection  # K m/s / m = K/s
+            )
+            self._T_mean[self._grid.core_nodes] += dT_dt[self._grid.core_nodes] * substep_dt
+
+
+            # Stefan condition: interface velocity [m/s]
+            if self.use_melt_diffusion:
+                # calculate a correction factor for spreading heat. May not be necessary if using full thermal model.
+                gradb = self._grid.calc_grad_at_link(self._b)
+                bprod = map_mean_of_link_nodes_to_link(self._grid, self._dzb_dt * self._b) # map to links for later divergence calculation
+                gradb_x, gradb_y = map_link_vector_components_to_node_raster(self._grid, gradb) # vector components
+                gradb_sq_node = gradb_x**2 + gradb_y**2  # vector magnitude at nodes
+                gradb_sq_link = map_mean_of_link_nodes_to_link(self._grid, gradb_sq_node)  # map to links for later divergence calculation
+                self.melt_diffusion = self._grid.calc_flux_div_at_node((gradb * bprod) / (1 + gradb_sq_link)) # term all together (Warburton et al. 2024)
+            else:
+                self.melt_diffusion = 0.0
+
+            # interface velocity interval
+            dz += ((flux_unfrozen - flux_frozen) / (self.rho_w * self.phi * self.L) + self.melt_diffusion) * substep_dt
+
+            # calculate the time remaining and advance count of substeps
+            remaining_time -= substep_dt
+            self._num_substeps += 1
+
+        # Net interface velocity from flux balance plus geometric melt diffusion, averaged over subtimesteps
+        self._dzb_dt = dz / self.dt
 
     def run_step(self):
         """Run a single time step of the model."""
-
+        
         eps = 1e-4 # small value to prevent thickness from going to zero
 
-        # Two options: steady state hydrology or dynamic
-        if self.params.get('steady', False):
+        # Two options: steady state hydrology or dynamic. 
+        # Updates water table, water fluxes, and calculates Qdiss
+        if self.use_steady_hydrology:
             self.run_hydrology_steady()
         else:
             self.run_hydrology_dynamic()
 
-        # Flux terms: solar, frozen, and dissipative
-        # flux_solar = self.S0 +  self.ku * (self.T_surface - self.Tm) / (self._z - self._zb)  # this version with thickness dependence
-        flux_solar = self.S0 + self.beta * (self.T_air - self.T_surface) # this version assumes steady state in vertical profile: all energy from surface reaches the interface
-        flux_frozen = self.kf * self.frozen_gradient  # uniform background (frozen gradient is a negative value)
-        flux_dissipation = self._Qdiss  # varies with local flow conditions
+        self.run_heat_transport()  # updates T_mean, calculates dzb_dt
 
-        # correction term for flux spreading - melt diffusion 
-        gradb = self._grid.calc_grad_at_link(self._b)
-        bprod = map_mean_of_link_nodes_to_link(self._grid, self._dzb_dt * self._b) # map to links for later divergence calculation
-        gradb_x, gradb_y = map_link_vector_components_to_node_raster(self._grid, gradb) # vector components
-        gradb_sq_node = gradb_x**2 + gradb_y**2  # vector magnitude at nodes
-        gradb_sq_link = map_mean_of_link_nodes_to_link(self._grid, gradb_sq_node)  # map to links for later divergence calculation
-        self.melt_diffusion = self._grid.calc_flux_div_at_node((gradb * bprod) / (1 + gradb_sq_link)) # term all together (Warburton et al. 2024)
-
-        # Interface velocity
-        self._dzb_dt = (flux_solar + flux_frozen + flux_dissipation) / (self.rho_w * self.phi * self.L) + self.melt_diffusion  # flux frozen added because value is negative, so it reduces the melt rate
+        # Apply Stefan condition to update permafrost table
         self._zb[:] = self._zb - self._dzb_dt * self.dt # note this also updates the boundary condition for the groundwater model, which is important for the feedback to work
         self._zb[self._zb >= self._z] = self._z[self._zb >= self._z] - eps # make sure refreezing doesn't cause total freezing above the land surface
         
-        # zwt keeps same position, aquifer adds water from deepening of permafrost table, so thickness increases by the melt depth
-        self._h[:] = (self._zwt - self._zb) # update aquifer thickness
-        self._b[:] = self._z - self._zb # update active layer thickness
-    
+
+        # Update derived geometric quantities
+        self._h[:] = self._zwt - self._zb  # aquifer thickness
+        self._b[:] = self._z - self._zb    # active layer thickness
+
     def run_model(self):
         """Run the model for the specified total time."""
 

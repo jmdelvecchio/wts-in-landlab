@@ -2,13 +2,17 @@
 Script to run the water track model in steady configuration
 """
 #%%
+import re
+import glob
 import shutil
+
 import numpy as np
 from scipy import signal
 import matplotlib.pyplot as plt
+
 from landlab import RasterModelGrid, imshow_grid
-from water_track_funcs import calc_growth_rate_1, calc_wavelenth_1
-from water_track_model import WaterTrackModel
+from scripts.water_track_funcs import calc_growth_rate_1, calc_wavelenth_1
+from model.water_track_model import WaterTrackModel
 
 #%%
 # grid and initial conditions
@@ -31,17 +35,30 @@ params = {}
 params['recharge_rate'] = 1.0e-6 # recharge rate (constant, uniform here) m/s
 params['hydraulic_conductivity'] = 1e-1 # hydraulic conductivity (constant, uniform here) m/s
 params['porosity'] = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
-params['S0'] = 100 # W/m^2, peak solar irradiance
+params['S0'] = 10 # W/m^2, peak solar irradiance
+
+params['frozen_gradient'] = -20 # -20 # K/m, temperature gradient in the frozen soil (constant for now)
+params['T_air'] = 1
+params['dt'] = 6*3600 # seconds
+params['T'] = 180 * 24 * 3600
+# params['gwdt'] = 1e3 # seconds, groundwater model timestep 
+# params['tol'] = 1e-10 # tolerance for numerical solvers
+# params['max_iter'] = 20 # maximum iterations for numerical solvers
+
+params['use_melt_diffusion'] = False
+params['use_steady_hydrology'] = False
+
+## parameters generally kept constant:
 params['kf'] = 2.728 # W/m/K, frozen soil
 params['ku'] = 1.2682 # W/m/K, unfrozen soil
 params['Tm'] = 0 # C, melting temperature
 params['L'] = 334E3 # J/kg, latent heat of fusion
-params['frozen_gradient'] = -20 # -20 # K/m, temperature gradient in the frozen soil (constant for now)
-params['T_surface'] = 0 #0 #-5 # C, surface temperature (constant for now)
-params['T_air'] = 1
-params['dt'] = 6*3600 # seconds
-params['T'] = 180 * 24 * 3600
-params['steady'] = False # whether to run the groundwater model to steady state or not
+params['beta'] = 0.04 # insulation parameter (W/m^2 K)
+params['rho_w'] = 1000 # kg/m^3
+params['rho_s'] = 2600 # kg/m^3
+params['C_s'] = 800 # J/kg/K, specific heat capacity of soil
+params['C_w'] = 4.2e3 # J/kg/K, specific heat capacity of water at ~5C
+
 
 output = {}
 output["output_interval"] = 20
@@ -50,9 +67,20 @@ output["output_fields"] = [
         "at_node:water_table__elevation",
         ]
 output["base_output_path"] = '/Users/tuv05476/Documents/Research Data/Local/water-tracks/wtm_steady_'
-output["run_id"] = 0 #make this task_id if multiple runs
+
+# get latest run ID so not to overwrite existing
+matching_files = glob.glob(f"{output['base_output_path']}*.nc")
+numbers = []
+for file_path in matching_files:
+    # Extract digits that appear right before the .nc extension
+    match = re.search(r'(\d+)\.nc$', file_path)
+    if match:
+        numbers.append(int(match.group(1)))
+output["run_id"] = max(numbers) + 1 if numbers else 0
+print(f'Current run ID: {output["run_id"]}')
 
 
+#%%
 ## Introduce random fluctuations to base elevation to seed water track formation
 lam = 5 # correlation length for the random field
 alpha = 0.01 # scaling factor for the random field
@@ -103,11 +131,14 @@ plt.show()
 shutil.copy('./water_track_model.py', output['base_output_path'] + f"water_track_model_{output['run_id']}.py")
 shutil.copy('./run_steady_model.py', output['base_output_path'] + f"run_steady_model_{output['run_id']}.py")
 
-mdl = WaterTrackModel(mg, params, output_dict=output)
-if params['steady']:
+# mdl = WaterTrackModel(mg, params, output_dict=output)
+mdl = WaterTrackModel(mg, params)
+if params['use_steady_hydrology']:
     mdl.run_hydrology_steady()
 else:
     mdl.run_hydrology_dynamic()
+
+#%%
 mdl.run_model()
 
 # %%
