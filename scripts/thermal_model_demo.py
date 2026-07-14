@@ -19,6 +19,7 @@ zb = mg.add_zeros('aquifer_base__elevation', at='node')
 zwt = mg.add_zeros("water_table__elevation", at="node")
 tmean = mg.add_zeros("mean_unfrozen__temperature", at="node")
 tmean[mg.y_of_node > 900] = 2
+tmean[np.logical_and(mg.x_of_node == 250, mg.y_of_node > 400)] = 2
 
 a = 0.05
 b = 5 # permeable thickness m
@@ -32,12 +33,14 @@ plt.figure()
 imshow_grid(mg, zwt-zb, colorbar_label="Aquifer thickness (m)")
 
 params = {}
-params['frozen_gradient'] = -20 # -20 # K/m, temperature gradient in the frozen soil (constant for now)
-params['T_air'] = 0.0
+params['frozen_gradient'] = 0 # -20 # K/m, temperature gradient in the frozen soil (constant for now)
+params['S0'] = 10 # W/m^2, peak solar irradiance
+params['T_air'] = 1.0
 params['dt'] = 10*6*3600 # seconds
 params['dtgw'] = 100*6*3600 # seconds
 params['T'] = 180 * 24 * 3600
 params['courant_coefficient'] = 0.1
+# params['ku'] = 0.00001
 
 params['recharge_rate'] = 5.0e-8 # recharge rate (constant, uniform here) m/s
 params['hydraulic_conductivity'] = 1e-4 # hydraulic conductivity (constant, uniform here) m/s

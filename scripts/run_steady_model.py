@@ -22,26 +22,28 @@ mg = RasterModelGrid((Ny,Nx), xy_spacing=dx, bc=boundaries)
 z = mg.add_zeros('topographic__elevation', at='node')
 zb = mg.add_zeros('aquifer_base__elevation', at='node')
 zwt = mg.add_zeros("water_table__elevation", at="node")
+tmean = mg.add_zeros("mean_unfrozen__temperature", at="node")
 
 # parabolic hillslope, uniform permeable thickness
 x = mg.x_of_node
 y = mg.y_of_node
 a = 0.00005
-b = 5 # permeable thickness m
+b = 0.5 # permeable thickness m
 z[:] = -a * y**2 + a * 2000**2
 zb[:] = z - b
+zwt[:] = zb + 0.1*b
 
 params = {}
 params['recharge_rate'] = 1.0e-6 # recharge rate (constant, uniform here) m/s
-params['hydraulic_conductivity'] = 1e-2 # hydraulic conductivity (constant, uniform here) m/s
+params['hydraulic_conductivity'] = 1e-1 # hydraulic conductivity (constant, uniform here) m/s
 params['porosity'] = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
 params['S0'] = 10 # W/m^2, peak solar irradiance
 
-params['frozen_gradient'] = -20 # -20 # K/m, temperature gradient in the frozen soil (constant for now)
+params['frozen_gradient'] = 10 # K/m, Temperature gradient in the frozen soil. In most recent model, positive is increasing temp vertically. 
 params['T_air'] = 1
 params['dt'] = 6*3600 # seconds
-params['T'] = 180 * 24 * 3600
-params['courant_coefficient'] = 0.1
+params['T'] = 18 * 24 * 3600
+params['courant_coefficient'] = 0.5
 # params['gwdt'] = 1e3 # seconds, groundwater model timestep 
 # params['tol'] = 1e-10 # tolerance for numerical solvers
 # params['max_iter'] = 20 # maximum iterations for numerical solvers
@@ -57,7 +59,7 @@ params['L'] = 334E3 # J/kg, latent heat of fusion
 params['beta'] = 0.04 # insulation parameter (W/m^2 K)
 params['rho_w'] = 1000 # kg/m^3
 params['rho_s'] = 2600 # kg/m^3
-params['C_s'] = 800 # J/kg/K, specific heat capacity of soil
+params['C_s'] = 700 # J/kg/K, specific heat capacity of soil
 params['C_w'] = 4.2e3 # J/kg/K, specific heat capacity of water at ~5C
 
 
@@ -188,3 +190,19 @@ for i in range(N):
 plt.xlabel('Length (m)')
 plt.ylabel('Power/Frequency (m^2 / 1/m)')
 plt.show()
+
+#%%
+
+# final timestep map view
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 3, 1)
+imshow_grid(mg, 'mean_unfrozen__temperature', cmap='Reds', colorbar_label='Mean Unfrozen Temperature (°C)')
+
+plt.subplot(1, 3, 2)
+imshow_grid(mg, mdl._dzb_dt, cmap='inferno', colorbar_label='Interface Velocity (m/s)')
+
+plt.subplot(1, 3, 3)
+imshow_grid(mg, mdl._z - mdl._zb, cmap='plasma', colorbar_label='Active Layer Thickness (m)')
+plt.tight_layout()
+plt.show()
+# %%

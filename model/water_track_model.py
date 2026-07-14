@@ -29,15 +29,15 @@ class WaterTrackModel:
         self.output_dict = output_dict
         # Initialize other model components here (e.g., groundwater flow, erosion)
         
-        self.S0 = params.get('S0', 0.04) # 0.04 W/m^2, peak solar irradiance
+        self.S0 = params.get('S0', 10) # W/m^2, peak solar irradiance
         self.k_f = params.get('kf', 2.728) # 2.0 W/m/K, frozen soil
         self.k_u = params.get('ku', 1.2682) # 0.5 W/m/K, unfrozen soil
         self.beta = params.get('beta', 0.04) # insulation parameter (W/m^2 K)
-        self.frozen_gradient = params.get('frozen_gradient', -20) # -20 # K/m, temperature gradient in the frozen soil (constant for now)
+        self.frozen_gradient = params.get('frozen_gradient', 10) # 10 # K/m, temperature gradient in the frozen soil (constant for now)
         self.T_air = params.get('T_air', 0) # C, air temperature (constant for now)
         self.rho_w = params.get('rho_w', 1000) # kg/m^3
         self.rho_s = params.get('rho_s', 2600) # kg/m^3
-        self.C_s = params.get('C_s', 800) # J/kg/K, specific heat capacity of soil
+        self.C_s = params.get('C_s', 700) # J/kg/K, specific heat capacity of soil
         self.C_w = params.get('C_w', 4.2e3) # J/kg/K, specific heat capacity of water at ~5C
         self.phi = params.get('porosity', 0.9) # porosity
 
@@ -46,7 +46,7 @@ class WaterTrackModel:
         
         self.g = params.get('g', 9.81) # m/s^2
         self.Tm = params.get('Tm', 0) # C, melting temperature
-        self.L = params.get('L', 334E3) # J/kg, latent heat of fusion
+        self.L = params.get('L', 334e3) # J/kg, latent heat of fusion
 
         self.tol = params.get('tol', 1e-10) # tolerance for numerical solvers
         self.max_iter = params.get('max_iter', 20) # maximum iterations for numerical solvers
@@ -74,8 +74,8 @@ class WaterTrackModel:
         self._zb = self._grid.at_node['aquifer_base__elevation']
         self._zwt = self._grid.at_node['water_table__elevation']
         self._T_mean = self._grid.at_node['mean_unfrozen__temperature']
+        self._h = self._grid.at_node['aquifer__thickness']
         self._Qdiss = self._grid.add_zeros('node', 'thermal_dissipation')
-        self._h = self._grid.add_zeros('node', 'aquifer_thickness')
         self._dzb_dt = np.zeros_like(self._zb) # initialize melt rate for use in correction term
         self._b = self._z - self._zb # initialize active layer thickness for use in correction term
         self._zb0 = self._zb.copy()
@@ -218,11 +218,11 @@ class WaterTrackModel:
             # Thermal terms scaled by 1/(Cu ρu b), advection scaled by 1/b
             dT_dt = (
                 (1.0 / (self.C_u * self.rho_u * self._b)) * (
-                    lateral_diffusion    # W/m2 / (J/m3) = K/s
+                    lateral_diffusion    # lateral diffusion, W/m2
                     + self._Qdiss        # dissipative heating, W/m2
                     + BC_top             # surface flux, W/m2
                     - flux_unfrozen      # heat lost to melting, W/m2
-                )
+                ) # W/m2 / (J/m3) = K/s
                 - (1.0 / self._b) * lateral_advection  # K m/s / m = K/s
             )
             self._T_mean[self._grid.core_nodes] += dT_dt[self._grid.core_nodes] * substep_dt
@@ -312,6 +312,21 @@ class WaterTrackModel:
         imshow_grid(self._grid, self._z - self._zb, cmap='plasma', colorbar_label='Active Layer Thickness (m)')
         plt.tight_layout()
         plt.show()
+
+
+        # final timestep map view
+        plt.figure(figsize=(12, 5))
+        plt.subplot(1, 3, 1)
+        imshow_grid(self._grid, 'mean_unfrozen__temperature', cmap='Reds', colorbar_label='Mean Unfrozen Temperature (°C)')
+
+        plt.subplot(1, 3, 2)
+        imshow_grid(self._grid, self._dzb_dt, cmap='inferno', colorbar_label='Interface Velocity (m/s)')
+
+        plt.subplot(1, 3, 3)
+        imshow_grid(self._grid, self._z - self._zb, cmap='plasma', colorbar_label='Active Layer Thickness (m)')
+        plt.tight_layout()
+        plt.show()
+
 
         # time evolution of cross slope variability
         plt.figure()
