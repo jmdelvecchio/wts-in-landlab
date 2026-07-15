@@ -57,6 +57,7 @@ def make_model(grid, dt=3600.0, **overrides):
 
     # node arrays  (neutral initial state)
     m._T_mean        = np.zeros(nn)
+    m._E             = np.zeros(nn)
     m._b             = np.ones(nn)    # 1 m active layer
     m._zb            = np.zeros(nn)
     m._z             = np.ones(nn)
@@ -132,6 +133,7 @@ def test_source_term_heating(flat_grid):
 
     m = make_model(flat_grid, dt=dt, Tm=T0)
     m._T_mean[:] = T0
+    m._E[:]      = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
     m._b[:]      = b0
     m._Qdiss[:]  = Q0
 
@@ -173,6 +175,7 @@ def test_stefan_condition_decoupled(flat_grid):
 
     m = make_model(flat_grid, dt=dt, frozen_gradient=fg)
     m._T_mean[:] = T_val
+    m._E[:]      = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
     m._b[:]      = b0
 
     _run(m)
@@ -221,6 +224,7 @@ def test_top_bc_single_step(flat_grid):
 
     m = make_model(flat_grid, dt=dt, S0=S0, beta=beta, T_air=T_air, Tm=T0)
     m._T_mean[:] = T0
+    m._E[:]      = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
     m._b[:]      = b0
 
     _run(m)
@@ -283,6 +287,7 @@ def test_gaussian_spreading():
     yc = np.mean(mg.y_of_node[mg.core_nodes])
     r2 = (mg.x_of_node - xc)**2 + (mg.y_of_node - yc)**2
     m._T_mean[:] = np.exp(-r2 / (2.0 * sigma0**2))
+    m._E[:] = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
     # boundary nodes: never updated by run_heat_transport; closed BCs mean
     # their values do not enter the flux divergence at core nodes
 
@@ -362,6 +367,7 @@ def test_peclet_profile():
     m._T_mean[:] = 0.5 * (T_hot + T_cold)
     # Fix Dirichlet values at all boundary nodes (they will not be updated)
     m._T_mean[mg.boundary_nodes] = T_analytical[mg.boundary_nodes]
+    m._E[:] = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
 
     # Uniform upward flow: depth-integrated flux q = u * b on vertical links
     m.gdp._q[:] = 0.0
@@ -418,6 +424,7 @@ def test_energy_conservation_variable_b(flat_grid):
 
     m = make_model(flat_grid, dt=dt, Tm=0.0)
     m._T_mean[:] = 0.0   # T = Tm everywhere → flux_unfrozen = 0
+    m._E[:] = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
 
     # Non-uniform b: the 1/b in ΔT must cancel with b in ΔE
     np.random.seed(1234)
