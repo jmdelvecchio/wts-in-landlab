@@ -81,6 +81,24 @@ class WaterTrackModel:
         self._b = self._z - self._zb # initialize active layer thickness for use in correction term
         self._zb0 = self._zb.copy()
 
+        # Boundary node bookkeeping. State variables on closed nodes stay at their initial values.
+        # Open (fixed-value) nodes get a dynamic Dirichlet T_mean, set each substep
+        # from the mean of their core neighbors, so heat/geometry can evolve there
+        # too. 
+        self._closed_nodes = self._grid.status_at_node == self._grid.BC_NODE_IS_CLOSED
+        self._open_nodes = self._grid.status_at_node == self._grid.BC_NODE_IS_FIXED_VALUE
+
+        open_node_ids = np.where(self._open_nodes)[0]
+        nbrs = self._grid.active_adjacent_nodes_at_node[open_node_ids]  # (n_open, 4), -1 padded
+        valid = nbrs >= 0
+        nbrs_safe = np.where(valid, nbrs, 0)
+        is_core_nbr = valid & (self._grid.status_at_node[nbrs_safe] == self._grid.BC_NODE_IS_CORE)
+
+        self._open_node_ids = open_node_ids
+        self._open_node_neighbors = nbrs_safe            # (n_open, 4)
+        self._open_node_neighbor_mask = is_core_nbr       # (n_open, 4) bool
+        self._open_node_has_core_neighbor = is_core_nbr.any(axis=1)
+
         # depth-integrated sensible heat, J/m2
         self._E = self._grid.add_zeros('node', 'sensible_heat_content')
         self._E = self.C_u * self.rho_u * self._b * (self._T_mean - self.Tm)
@@ -163,6 +181,26 @@ class WaterTrackModel:
         self._Qdiss = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) # dissipated heat is rho_w g (q dot gradh)
     
 
+    def _update_open_boundary_temperature(self):
+        """Set T_mean at open (fixed-value) boundary nodes to the mean of their
+        core neighbors. Acts as a dynamic Dirichlet condition: it lets heat
+        cross the open boundary and tracks the domain's evolving state instead
+        of pinning the boundary to a fixed value, while carrying no cross-
+        boundary structure of its own. Nodes with no core neighbor (e.g.
+        corners) are left unchanged.
+        """
+        has_nbr = self._open_node_has_core_neighbor
+        if not np.any(has_nbr):
+            return
+
+        ids = self._open_node_ids[has_nbr]
+        nbr_ids = self._open_node_neighbors[has_nbr]
+        mask = self._open_node_neighbor_mask[has_nbr]
+
+        nbr_vals = np.where(mask, self._T_mean[nbr_ids], 0.0)
+        counts = mask.sum(axis=1)
+        self._T_mean[ids] = nbr_vals.sum(axis=1) / counts
+
     def run_heat_transport(self):
         """
         Update depth-averaged active layer temperature T_mean for one timestep dt, using 
@@ -211,7 +249,7 @@ class WaterTrackModel:
 
             # Bottom boundary condition: heat flux from active layer to interface [W/m2]
             # Linear approximation to temperature profile, T drops from T_mean to Tm over b/2
-            flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (self._b / 2)
+            flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (b_local / 2)
 
             # calculate courant minimum timestep
             dt_courant = self._courant_coefficient * np.min(
@@ -236,6 +274,8 @@ class WaterTrackModel:
                 self.melt_diffusion = 0.0
 
             db_dt_local = (flux_unfrozen - flux_frozen) / (self.rho_w * self.phi * self.L) + self.melt_diffusion
+            # Closed nodes carry no flux so do not evolve
+            db_dt_local[self._closed_nodes] = 0.0
 
             # Sensible heat content update [W/m2]
             # Newly thawed material enters at Tm, contributing zero to E.
@@ -255,6 +295,10 @@ class WaterTrackModel:
             self._T_mean[self._grid.core_nodes] = (
                 self.Tm + self._E[self._grid.core_nodes] / (self.C_u * self.rho_u * b_local[self._grid.core_nodes])
             )
+
+            # Dynamic Dirichlet BC at open boundaries, refreshed each substep so
+            # it stays current for the next substep fluxes
+            self._update_open_boundary_temperature()
 
             dz += db_dt_local * substep_dt
 
@@ -278,8 +322,10 @@ class WaterTrackModel:
 
         self.run_heat_transport()  # updates T_mean, calculates dzb_dt
 
-        # Apply Stefan condition to update permafrost table
-        self._zb[:] = self._zb - self._dzb_dt * self.dt # note this also updates the boundary condition for the groundwater model, which is important for the feedback to work
+        # Apply Stefan condition to update permafrost table. Closed nodes are excluded
+        # explicitly here as well.
+        active = ~self._closed_nodes
+        self._zb[active] = self._zb[active] - self._dzb_dt[active] * self.dt # note this also updates the boundary condition for the groundwater model, which is important for the feedback to work
         self._zb[self._zb >= self._z] = self._z[self._zb >= self._z] - eps # make sure refreezing doesn't cause total freezing above the land surface
         
 
@@ -317,13 +363,19 @@ class WaterTrackModel:
         # final timestep map view
         plt.figure(figsize=(12, 5))
         plt.subplot(1, 3, 1)
-        imshow_grid(self._grid, 'aquifer__thickness', cmap='viridis', colorbar_label='Aquifer Thickness (m)')
+        minh = np.min(self._h[self._grid.core_nodes])
+        maxh = np.max(self._h[self._grid.core_nodes])
+        imshow_grid(self._grid, 'aquifer__thickness', cmap='viridis', colorbar_label='Aquifer Thickness (m)', vmin=minh, vmax=maxh)
 
         plt.subplot(1, 3, 2)
-        imshow_grid(self._grid, self._Qdiss, cmap='inferno', colorbar_label='Dissipation (W/m^2)')
+        minQ = np.min(self._Qdiss[self._grid.core_nodes])
+        maxQ = np.max(self._Qdiss[self._grid.core_nodes])
+        imshow_grid(self._grid, self._Qdiss, cmap='inferno', colorbar_label='Dissipation (W/m^2)', vmin=minQ, vmax=maxQ)
 
         plt.subplot(1, 3, 3)
-        imshow_grid(self._grid, self._z - self._zb, cmap='plasma', colorbar_label='Active Layer Thickness (m)')
+        minb = np.min(self._b[self._grid.core_nodes])
+        maxb = np.max(self._b[self._grid.core_nodes])
+        imshow_grid(self._grid, self._b, cmap='plasma', colorbar_label='Active Layer Thickness (m)', vmin=minb, vmax=maxb)
         plt.tight_layout()
         plt.show()
 
@@ -331,13 +383,19 @@ class WaterTrackModel:
         # final timestep map view
         plt.figure(figsize=(12, 5))
         plt.subplot(1, 3, 1)
-        imshow_grid(self._grid, 'mean_unfrozen__temperature', cmap='Reds', colorbar_label='Mean Unfrozen Temperature (°C)')
+        minT = np.min(self._T_mean[self._grid.core_nodes])
+        maxT = np.max(self._T_mean[self._grid.core_nodes])
+        imshow_grid(self._grid, 'mean_unfrozen__temperature', cmap='Reds', colorbar_label='Mean Unfrozen Temperature (°C)', vmin=minT, vmax=maxT)
 
         plt.subplot(1, 3, 2)
-        imshow_grid(self._grid, self._dzb_dt, cmap='inferno', colorbar_label='Interface Velocity (m/s)')
+        mindzb = np.min(self._dzb_dt[self._grid.core_nodes])
+        maxdzb = np.max(self._dzb_dt[self._grid.core_nodes])
+        imshow_grid(self._grid, self._dzb_dt, cmap='inferno', colorbar_label='Interface Velocity (m/s)', vmin=mindzb, vmax=maxdzb)
 
         plt.subplot(1, 3, 3)
-        imshow_grid(self._grid, self._z - self._zb, cmap='plasma', colorbar_label='Active Layer Thickness (m)')
+        minb = np.min(self._b[self._grid.core_nodes])
+        maxb = np.max(self._b[self._grid.core_nodes])
+        imshow_grid(self._grid, self._b, cmap='plasma', colorbar_label='Active Layer Thickness (m)', vmin=minb, vmax=maxb)
         plt.tight_layout()
         plt.show()
 

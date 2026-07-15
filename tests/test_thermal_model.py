@@ -74,6 +74,25 @@ def make_model(grid, dt=3600.0, **overrides):
     m.gdp._q  = np.zeros(nl)   # no lateral flow
     m.gdp._vel = np.zeros(nl)
 
+    # boundary node bookkeeping, mirroring WaterTrackModel.__init__ exactly so
+    # closed/open node handling in run_heat_transport works on the stub too.
+    m._closed_nodes = grid.status_at_node == grid.BC_NODE_IS_CLOSED
+    m._open_nodes = grid.status_at_node == grid.BC_NODE_IS_FIXED_VALUE
+
+    open_node_ids = np.where(m._open_nodes)[0]
+    nbrs = grid.active_adjacent_nodes_at_node[open_node_ids]
+    valid = nbrs >= 0
+    nbrs_safe = np.where(valid, nbrs, 0)
+    is_core_nbr = valid & (grid.status_at_node[nbrs_safe] == grid.BC_NODE_IS_CORE)
+
+    m._open_node_ids = open_node_ids
+    m._open_node_neighbors = nbrs_safe
+    m._open_node_neighbor_mask = is_core_nbr
+    m._open_node_has_core_neighbor = is_core_nbr.any(axis=1)
+    m._update_open_boundary_temperature = (
+        lambda: WaterTrackModel._update_open_boundary_temperature(m)
+    )
+
     # apply per-test overrides
     for key, val in overrides.items():
         setattr(m, key, val)
@@ -323,8 +342,11 @@ def test_peclet_profile():
     with analytical solution:
         T(y) = T_hot + (T_cold - T_hot) * (exp(Pe y/L) - 1) / (exp(Pe) - 1)
 
-    Boundary nodes (rows 0 and Ny-1) are never updated by run_heat_transport,
-    implementing implicit Dirichlet BCs — no explicit enforcement needed.
+    Boundary nodes (rows 0 and Ny-1) are held at fixed reservoir values via an
+    explicit no-op override of _update_open_boundary_temperature: this test
+    exercises bulk advection-diffusion physics, not the model's own open-
+    boundary handling (which instead sets T dynamically from neighbor means;
+    see test_open_boundary_tracks_neighbor_mean for that).
 
     Parameter choices:
     ┌───────────────────────────────────────────────────────────────────────┐
@@ -362,6 +384,9 @@ def test_peclet_profile():
 
     m = make_model(mg, dt=dt, k_u=1.0, C_u=1.0, rho_u=1.0, Tm=0.0)
     m._b[:] = b_val
+    # This test wants fixed reservoir BCs, not the model's dynamic
+    # neighbor-mean open-boundary condition -- disable it here.
+    m._update_open_boundary_temperature = lambda: None
 
     # Start from uniform T (not the steady state) to test convergence
     m._T_mean[:] = 0.5 * (T_hot + T_cold)
@@ -454,4 +479,134 @@ def test_energy_conservation_variable_b(flat_grid):
         rtol=1e-10,
         err_msg="Energy conservation: ΔE ≠ Q0·dt·ΣA; "
                 "check 1/b weighting in dT_dt for variable b",
+    )
+
+
+# ============================================================
+# Test 7 – Boundary handling: closed nodes, open nodes
+# ============================================================
+
+@pytest.fixture
+def mixed_boundary_grid():
+    """
+    5x5 grid with one open edge (top) and three closed edges (left, right,
+    bottom) -- the same boundary configuration used in the production
+    scripts. Gives a mix of closed, open, and core nodes in one grid.
+    """
+    return RasterModelGrid(
+        (5, 5), xy_spacing=10.0,
+        bc={"top": "open", "left": "closed", "bottom": "closed", "right": "closed"},
+    )
+
+
+def test_closed_nodes_never_update(mixed_boundary_grid):
+    """
+    Closed nodes must not be touched by run_heat_transport at all: T_mean,
+    E, and the resulting interface velocity (dzb_dt) must stay exactly at
+    their initial values, even under forcing that clearly changes core
+    nodes. The masking happens upstream (on db_dt_local, before b_local/dz
+    accumulate it), so this also checks that no inconsistent value can
+    build up over repeated steps.
+    """
+    mg = mixed_boundary_grid
+    dt = 3600.0
+
+    m = make_model(mg, dt=dt, S0=20.0, beta=0.04, T_air=5.0, frozen_gradient=1.0)
+    m._T_mean[:] = 0.5
+    m._b[:] = 1.0
+    m._E[:] = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
+    m._Qdiss[:] = 5.0
+
+    closed = m._closed_nodes
+    T_before = m._T_mean[closed].copy()
+    E_before = m._E[closed].copy()
+
+    for _ in range(5):
+        _run(m)
+
+    np.testing.assert_array_equal(
+        m._T_mean[closed], T_before,
+        err_msg="Closed node T_mean was modified by run_heat_transport",
+    )
+    np.testing.assert_array_equal(
+        m._E[closed], E_before,
+        err_msg="Closed node E was modified by run_heat_transport",
+    )
+    np.testing.assert_array_equal(
+        m._dzb_dt[closed], np.zeros(np.sum(closed)),
+        err_msg="Closed node dzb_dt should be exactly zero (no evolution)",
+    )
+    # sanity check: the forcing actually did change core nodes, otherwise
+    # this test would pass vacuously
+    assert not np.allclose(m._T_mean[mg.core_nodes], 0.5), (
+        "Test forcing did not change core T_mean; test would be vacuous"
+    )
+
+
+def test_open_boundary_tracks_neighbor_mean(mixed_boundary_grid):
+    """
+    _update_open_boundary_temperature sets each open node's T_mean to the
+    mean of its core neighbors' current T_mean -- a dynamic Dirichlet BC,
+    generic to whichever edge(s) are marked open. Nodes with no core
+    neighbor (e.g. corners) are left untouched.
+    """
+    mg = mixed_boundary_grid
+    m = make_model(mg)
+
+    # distinct value per node so picking the wrong neighbor set is detectable
+    m._T_mean[:] = np.arange(mg.number_of_nodes, dtype=float)
+    T_ic = m._T_mean.copy()
+
+    m._update_open_boundary_temperature()
+
+    has_nbr = m._open_node_has_core_neighbor
+    for node in m._open_node_ids[has_nbr]:
+        nbrs = mg.active_adjacent_nodes_at_node[node]
+        valid_nbrs = nbrs[nbrs >= 0]
+        core_nbrs = valid_nbrs[mg.status_at_node[valid_nbrs] == mg.BC_NODE_IS_CORE]
+        expected = T_ic[core_nbrs].mean()
+        assert m._T_mean[node] == pytest.approx(expected), (
+            f"Open node {node} T_mean did not match the mean of its core neighbors"
+        )
+
+    unchanged = m._open_node_ids[~has_nbr]
+    np.testing.assert_array_equal(
+        m._T_mean[unchanged], T_ic[unchanged],
+        err_msg="Open node with no core neighbor should be left unchanged",
+    )
+
+
+def test_open_boundary_active_layer_can_deepen(mixed_boundary_grid):
+    """
+    Because open-boundary T_mean now tracks its core neighbors instead of
+    staying frozen at Tm, the open boundary should show net melting
+    (dzb_dt > 0) under forcing that warms the domain, just like a core
+    node -- unlike a closed node, which stays inert (dzb_dt == 0) under the
+    same forcing.
+    """
+    mg = mixed_boundary_grid
+    dt = 3600.0
+
+    # Small frozen_gradient / large Qdiss so flux_unfrozen clearly overtakes
+    # flux_frozen within a few steps.
+    m = make_model(mg, dt=dt, S0=50.0, beta=0.04, T_air=5.0, frozen_gradient=0.05)
+    m._T_mean[:] = 0.0
+    m._b[:] = 1.0
+    m._E[:] = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
+    m._Qdiss[:] = 20.0
+
+    for _ in range(5):
+        _run(m)
+
+    open_with_nbr = m._open_node_ids[m._open_node_has_core_neighbor]
+    assert np.all(m._dzb_dt[open_with_nbr] > 0), (
+        "Open boundary nodes with a core neighbor should show net melting "
+        "under this warming forcing, same as core nodes"
+    )
+    assert np.all(m._dzb_dt[mg.core_nodes] > 0), (
+        "Sanity check failed: core nodes should also show net melting"
+    )
+    np.testing.assert_array_equal(
+        m._dzb_dt[m._closed_nodes], np.zeros(np.sum(m._closed_nodes)),
+        err_msg="Closed nodes should remain inert even as the open boundary deepens",
     )
