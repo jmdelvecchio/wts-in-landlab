@@ -10,6 +10,20 @@ from scipy.signal import welch
 import numpy as np
 from scipy import optimize
 
+
+def notional_equilibrium_temperature(S0, beta, T_air, kf, frozen_gradient):
+    """
+    0-D notional equilibrium T_mean: the temperature at which the top
+    boundary flux BC_top = S0 + beta*(T_air - T_mean) exactly balances the
+    fixed conductive loss flux_frozen = kf*frozen_gradient, ignoring Qdiss
+    and lateral diffusion/advection.
+
+    For diagnostic purposes.
+    """
+    flux_frozen = kf * frozen_gradient
+    return T_air - (flux_frozen - S0) / beta
+
+
 def calc_wavelenth_1(xt, kf, frozen_grad, rho_w, slope, hydraulic_conductivity):
     """
     Calculates the wavelength of a water track based on the given parameters.

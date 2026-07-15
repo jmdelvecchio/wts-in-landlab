@@ -12,13 +12,13 @@ from scipy import signal
 import matplotlib.pyplot as plt
 
 from landlab import RasterModelGrid, imshow_grid
-from water_track_funcs import calc_growth_rate_1, calc_wavelenth_1
+from water_track_funcs import calc_growth_rate_1, calc_wavelenth_1, notional_equilibrium_temperature
 from model.water_track_model import WaterTrackModel
 
 #%%
 # grid and initial conditions
 boundaries = {"top": "open", "left": "closed", "bottom": "closed", "right": "closed"}
-Nx = 101; Ny = 200; dx = 5
+Nx = 100; Ny = 150; dx = 10
 mg = RasterModelGrid((Ny,Nx), xy_spacing=dx, bc=boundaries)
 z = mg.add_zeros('topographic__elevation', at='node')
 zb = mg.add_zeros('aquifer_base__elevation', at='node')
@@ -34,11 +34,18 @@ z[:] = -a * y**2 + a * 2000**2
 zb[:] = z - b
 zwt[:] = zb + 0.1*b
 
+# hillslope cross section
+plt.figure()
+plt.plot(y, z)
+plt.xlabel('Y coordinate (m)')
+plt.ylabel('Elevation (m)')
+plt.show()
+
 params = {}
 params['recharge_rate'] = 1.0e-6 # recharge rate (constant, uniform here) m/s
 params['hydraulic_conductivity'] = 1e-1 # hydraulic conductivity (constant, uniform here) m/s
 params['porosity'] = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
-params['S0'] = 35.0 # 10 # W/m^2, peak solar irradiance
+params['S0'] = 30.0 # 10 # W/m^2, peak solar irradiance
 
 params['frozen_gradient'] = 10.0 #10 # K/m, Temperature gradient in the frozen soil. In most recent model, positive is increasing temp vertically. 
 params['T_air'] = 1
@@ -57,11 +64,17 @@ params['kf'] = 2.728 # W/m/K, frozen soil
 params['ku'] = 1.2682 # W/m/K, unfrozen soil
 params['Tm'] = 0 # C, melting temperature
 params['L'] = 334E3 # J/kg, latent heat of fusion
-params['beta'] = 0.0 #0.04 # insulation parameter (W/m^2 K)
+params['beta'] = 0.4 # 0.04 # insulation parameter (W/m^2 K)
 params['rho_w'] = 1000 # kg/m^3
 params['rho_s'] = 2600 # kg/m^3
 params['C_s'] = 700 # J/kg/K, specific heat capacity of soil
 params['C_w'] = 4.2e3 # J/kg/K, specific heat capacity of water at ~5C
+
+
+T_eq = notional_equilibrium_temperature(
+    S0=params['S0'], beta=params['beta'], T_air=params['T_air'], kf=params['kf'], frozen_gradient=params['frozen_gradient']
+)
+print(f"Notional equilibrium T_mean: {T_eq:.1f} C")
 
 
 output = {}
@@ -113,7 +126,7 @@ print(f'Growth rate: {3600*24*365*growth_rate:.2e} meters/year')
 zb0 = zb.copy()
 
 zb[:] = zb + fluct
-zwt[:] = zb + 0.1 # near equilibrium thickness
+zwt[:] = zb + 0.5 # near equilibrium thickness
 
 
 # spectral analysis across the hillslope
