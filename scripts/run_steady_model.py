@@ -5,6 +5,7 @@ Script to run the water track model in steady configuration
 import re
 import glob
 import shutil
+import warnings
 
 import numpy as np
 from scipy import signal
@@ -27,7 +28,7 @@ tmean = mg.add_zeros("mean_unfrozen__temperature", at="node")
 # parabolic hillslope, uniform permeable thickness
 x = mg.x_of_node
 y = mg.y_of_node
-a = 0.00005
+a = 0.0001
 b = 0.5 # permeable thickness m
 z[:] = -a * y**2 + a * 2000**2
 zb[:] = z - b
@@ -37,12 +38,12 @@ params = {}
 params['recharge_rate'] = 1.0e-6 # recharge rate (constant, uniform here) m/s
 params['hydraulic_conductivity'] = 1e-1 # hydraulic conductivity (constant, uniform here) m/s
 params['porosity'] = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
-params['S0'] = 10 # W/m^2, peak solar irradiance
+params['S0'] = 35.0 # 10 # W/m^2, peak solar irradiance
 
-params['frozen_gradient'] = 10 # K/m, Temperature gradient in the frozen soil. In most recent model, positive is increasing temp vertically. 
+params['frozen_gradient'] = 10.0 #10 # K/m, Temperature gradient in the frozen soil. In most recent model, positive is increasing temp vertically. 
 params['T_air'] = 1
 params['dt'] = 6*3600 # seconds
-params['T'] = 18 * 24 * 3600
+params['T'] = 180 * 24 * 3600
 params['courant_coefficient'] = 0.5
 # params['gwdt'] = 1e3 # seconds, groundwater model timestep 
 # params['tol'] = 1e-10 # tolerance for numerical solvers
@@ -56,7 +57,7 @@ params['kf'] = 2.728 # W/m/K, frozen soil
 params['ku'] = 1.2682 # W/m/K, unfrozen soil
 params['Tm'] = 0 # C, melting temperature
 params['L'] = 334E3 # J/kg, latent heat of fusion
-params['beta'] = 0.04 # insulation parameter (W/m^2 K)
+params['beta'] = 0.0 #0.04 # insulation parameter (W/m^2 K)
 params['rho_w'] = 1000 # kg/m^3
 params['rho_s'] = 2600 # kg/m^3
 params['C_s'] = 700 # J/kg/K, specific heat capacity of soil
@@ -106,7 +107,7 @@ print(f'Growth rate: {3600*24*365*growth_rate:.2e} meters/year')
 
 # wavelength_target = round(wavelength, 2)*2.0  # meters
 # kappa = 2 * np.pi / wavelength_target
-amplitude = 0.01  # small perturbation, meters
+# amplitude = 0.01  # small perturbation, meters
 # fluct = amplitude * np.sin(kappa * mg.x_of_node)
 
 zb0 = zb.copy()
@@ -142,6 +143,28 @@ else:
     mdl.run_hydrology_dynamic()
 
 #%%
+
+## Check the domain-mean energy balance implied by the hydrology solution before
+## running the full model: is this parameter combination even in a growth (thawing)
+## regime, or will the active layer refreeze?
+flux_frozen = mdl.k_f * mdl.frozen_gradient
+Qdiss_mean = mdl._Qdiss[mg.core_nodes].mean()
+BC_top_mean = (mdl.S0 + mdl.beta * (mdl.T_air - mdl._T_mean))[mg.core_nodes].mean()
+net_flux = Qdiss_mean + BC_top_mean - flux_frozen
+
+print(f'Flux frozen (conductive loss to permafrost): {flux_frozen:.4f} W/m^2')
+print(f'Mean dissipative heating (Qdiss): {Qdiss_mean:.4f} W/m^2')
+print(f'Mean top boundary flux (BC_top): {BC_top_mean:.4f} W/m^2')
+print(f'Net flux (Qdiss + BC_top - flux_frozen): {net_flux:.4f} W/m^2')
+
+if net_flux < 0:
+    warnings.warn(
+        f'Net flux is negative ({net_flux:.4f} W/m^2): mean dissipative + top-boundary heating '
+        'cannot offset conductive loss to the frozen layer. This parameter combination is in a '
+        'freezing regime.'
+    )
+
+#%%
 mdl.run_model()
 
 # %%
@@ -151,18 +174,18 @@ mdl.make_plots()
 
 plt.figure(figsize=(15,5))
 plt.subplot(1, 3, 2)
-imshow_grid(mg, mdl.melt_diffusion, cmap='plasma', colorbar_label='Melt diffusion rate (m/s)')
+imshow_grid(mg, mdl._z - mdl._zb, cmap='plasma', colorbar_label='Active layer thickness (m)', vmin=0.7, vmax=0.8)
 
 #%%
 
 plt.figure(figsize=(15,5))
 plt.subplot(1, 3, 2)
-imshow_grid(mg, mdl._T_mean, cmap='plasma', colorbar_label='Temperature (C)')
+imshow_grid(mg, mdl._T_mean, cmap='plasma', colorbar_label='Temperature (C)', vmin=10, vmax=10.5)
 
 # %%
 plt.figure(figsize=(15,5))
 plt.subplot(1, 3, 2)
-imshow_grid(mg, mdl._dzb_dt, cmap='plasma', colorbar_label='Base melt rate (m/s)')
+imshow_grid(mg, mdl._dzb_dt, cmap='plasma', colorbar_label='Base melt rate (m/s)', vmin=1.8e-8, vmax=2e-8)
 
 # %%
 
@@ -189,6 +212,7 @@ for i in range(N):
     plt.loglog(1/frequencies[1:], psd[1:], color=colors[i], alpha=0.2)
 plt.xlabel('Length (m)')
 plt.ylabel('Power/Frequency (m^2 / 1/m)')
+plt.ylim(1e-10, 1e-2)
 plt.show()
 
 #%%
@@ -205,4 +229,9 @@ plt.subplot(1, 3, 3)
 imshow_grid(mg, mdl._z - mdl._zb, cmap='plasma', colorbar_label='Active Layer Thickness (m)')
 plt.tight_layout()
 plt.show()
+# %%
+
+plt.subplot(1, 3, 2)
+imshow_grid(mg, np.log10(abs(mdl._dzb_dt - np.mean(mdl._dzb_dt))), cmap='inferno', colorbar_label='Interface Velocity (m/s)')
+
 # %%
