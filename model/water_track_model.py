@@ -75,10 +75,15 @@ class WaterTrackModel:
         self._zwt = self._grid.at_node['water_table__elevation']
         self._T_mean = self._grid.at_node['mean_unfrozen__temperature']
         self._h = self._grid.at_node['aquifer__thickness']
+
         self._Qdiss = self._grid.add_zeros('node', 'thermal_dissipation')
         self._dzb_dt = np.zeros_like(self._zb) # initialize melt rate for use in correction term
         self._b = self._z - self._zb # initialize active layer thickness for use in correction term
         self._zb0 = self._zb.copy()
+
+        # depth-integrated sensible heat, J/m2
+        self._E = self._grid.add_zeros('node', 'sensible_heat_content')
+        self._E = self.C_u * self.rho_u * self._b * (self._T_mean - self.Tm)
 
         # configure outputs
         if output_dict:
@@ -160,43 +165,48 @@ class WaterTrackModel:
 
     def run_heat_transport(self):
         """
-        Update depth-averaged active layer temperature T_mean for one timestep dt.
+        Update depth-averaged active layer temperature T_mean for one timestep dt, using 
+        a depth-integrated sensible heat formulation: E = Cu rho_u b (T_mean - Tm)
         Computes and stores dzb_dt via the Stefan condition for use in run_step().
         
-        The depth-integrated heat equation is:
+        The depth-integrated heat equation for E is:
         
-        dT/dt = (1/(Cu rho_u b)) * [div (ku b gradT) + Qdiss + BC_top - flux_unfrozen]
-                - (1/b) * [div (T q) - T div q]
+        dE/dt = div (ku b gradT) + Qdiss + BC_top - flux_unfrozen
+                - Cu rho_u * [div (T q) - T div q]
         
-        where the Stefan condition at the base gives dzb_dt.
+        where the Stefan condition at the base gives dzb_dt. The term [div (T q) - T div q]
+        comes from the product rule: q grad T = div (T q) - T div q
         """
 
-        # Heat flux into frozen layer (stabilizing, removes energy from interface)
         flux_frozen = self.k_f * self.frozen_gradient  # W/m2
-    
+
         remaining_time = self.dt
         self._num_substeps = 0
-        dz = np.zeros_like(self._zb) # sum up the melt at each subtimestep
+        dz = np.zeros_like(self._zb)  # sum up the melt at each subtimestep
+
+        # local copy of active layer thickness, evolved internally within this
+        # call to keep flux_unfrozen and the diffusion coefficient consistent with the
+        # current thaw depth as it changes over substeps. self._b is only updated in run_step.
+        b_local = self._b.copy()
+
         grad_T = np.zeros_like(self._grid.length_of_link)
         while remaining_time > 0:
 
             # Lateral diffusion: div (ku b gradT) [W/m2]
-            grad_T[self._grid.active_links] = self._grid.calc_grad_at_link(self._T_mean)[self._grid.active_links]            # K/m at links
-            b_at_link = map_mean_of_link_nodes_to_link(self._grid, self._b) # m at links
-            # b_at_link = map_value_at_max_node_to_link(self._grid, self._b, self._b) # m at links
-            diff_flux = self.k_u * b_at_link * grad_T                       # W/m at links
-            lateral_diffusion = self._grid.calc_flux_div_at_node(diff_flux) # W/m2 at nodes
+            grad_T[self._grid.active_links] = self._grid.calc_grad_at_link(self._T_mean)[self._grid.active_links]
+            b_at_link = map_mean_of_link_nodes_to_link(self._grid, b_local)
+            diff_flux = self.k_u * b_at_link * grad_T
+            lateral_diffusion = self._grid.calc_flux_div_at_node(diff_flux)
+            # lateral_diffusion = np.zeros_like(self._T_mean)
 
             # Lateral advection: q gradT = div (Tq) - T(div q) [K m/s at nodes]
-            # T_at_link = map_mean_of_link_nodes_to_link(self._grid, self._T_mean)  # K at links
-            T_at_link = map_value_at_max_node_to_link(self._grid, self._zwt, self._T_mean)  # K at links
-            adv_flux = T_at_link * self.gdp._q                                    # K m2/s at links
-            flux_div_Tq = self._grid.calc_flux_div_at_node(adv_flux)               # K m/s at nodes
-            flux_div_q = self._grid.calc_flux_div_at_node(self.gdp._q)             # m/s at nodes
-            lateral_advection = flux_div_Tq - self._T_mean * flux_div_q           # K m/s at nodes
+            T_at_link = map_value_at_max_node_to_link(self._grid, self._zwt, self._T_mean)
+            adv_flux = T_at_link * self.gdp._q
+            flux_div_Tq = self._grid.calc_flux_div_at_node(adv_flux)
+            flux_div_q = self._grid.calc_flux_div_at_node(self.gdp._q)
+            lateral_advection = flux_div_Tq - self._T_mean * flux_div_q  # K m/s at nodes
 
             # Top boundary condition [W/m2]
-            # Solar/radiative forcing plus conductive exchange with atmosphere
             BC_top = self.S0 + self.beta * (self.T_air - self._T_mean)
 
             # Bottom boundary condition: heat flux from active layer to interface [W/m2]
@@ -207,43 +217,47 @@ class WaterTrackModel:
             dt_courant = self._courant_coefficient * np.min(
                 np.divide(
                     self._grid.length_of_link,
-                    abs(self.gdp._vel), # leave out division by porosity? 
+                    abs(self.gdp._vel),
                     where=abs(self.gdp._vel) > 0,
                     out=np.ones_like(self.gdp._vel) * 1e15,
                 )
             )
             substep_dt = min([dt_courant, remaining_time])
 
-            # Depth-averaged temperature update [K/s]
-            # Thermal terms scaled by 1/(Cu ρu b), advection scaled by 1/b
-            dT_dt = (
-                (1.0 / (self.C_u * self.rho_u * self._b)) * (
-                    lateral_diffusion    # lateral diffusion, W/m2
-                    + self._Qdiss        # dissipative heating, W/m2
-                    + BC_top             # surface flux, W/m2
-                    - flux_unfrozen      # heat lost to melting, W/m2
-                ) # W/m2 / (J/m3) = K/s
-                - (1.0 / self._b) * lateral_advection  # K m/s / m = K/s
-            )
-            self._T_mean[self._grid.core_nodes] += dT_dt[self._grid.core_nodes] * substep_dt
-
-
-            # Stefan condition: interface velocity [m/s]
+            # Stefan condition: local interface velocity for this substep [m/s]
             if self.use_melt_diffusion:
-                # calculate a correction factor for spreading heat. May not be necessary if using full thermal model.
-                gradb = self._grid.calc_grad_at_link(self._b)
-                bprod = map_mean_of_link_nodes_to_link(self._grid, self._dzb_dt * self._b) # map to links for later divergence calculation
-                gradb_x, gradb_y = map_link_vector_components_to_node_raster(self._grid, gradb) # vector components
-                gradb_sq_node = gradb_x**2 + gradb_y**2  # vector magnitude at nodes
-                gradb_sq_link = map_mean_of_link_nodes_to_link(self._grid, gradb_sq_node)  # map to links for later divergence calculation
-                self.melt_diffusion = self._grid.calc_flux_div_at_node((gradb * bprod) / (1 + gradb_sq_link)) # term all together (Warburton et al. 2024)
+                gradb = self._grid.calc_grad_at_link(b_local)
+                bprod = map_mean_of_link_nodes_to_link(self._grid, self._dzb_dt * b_local)
+                gradb_x, gradb_y = map_link_vector_components_to_node_raster(self._grid, gradb)
+                gradb_sq_node = gradb_x**2 + gradb_y**2
+                gradb_sq_link = map_mean_of_link_nodes_to_link(self._grid, gradb_sq_node)
+                self.melt_diffusion = self._grid.calc_flux_div_at_node((gradb * bprod) / (1 + gradb_sq_link))
             else:
                 self.melt_diffusion = 0.0
 
-            # interface velocity interval
-            dz += ((flux_unfrozen - flux_frozen) / (self.rho_w * self.phi * self.L) + self.melt_diffusion) * substep_dt
+            db_dt_local = (flux_unfrozen - flux_frozen) / (self.rho_w * self.phi * self.L) + self.melt_diffusion
 
-            # calculate the time remaining and advance count of substeps
+            # Sensible heat content update [W/m2]
+            # Newly thawed material enters at Tm, contributing zero to E.
+            dE_dt = (
+                lateral_diffusion
+                + self._Qdiss
+                + BC_top
+                - flux_unfrozen
+                - self.C_u * self.rho_u * lateral_advection
+            )
+            self._E[self._grid.core_nodes] += dE_dt[self._grid.core_nodes] * substep_dt
+
+            # advance the local geometry
+            b_local = b_local + db_dt_local * substep_dt
+
+            # recover T_mean diagnostically from updated E and b_local
+            self._T_mean[self._grid.core_nodes] = (
+                self.Tm + self._E[self._grid.core_nodes] / (self.C_u * self.rho_u * b_local[self._grid.core_nodes])
+            )
+
+            dz += db_dt_local * substep_dt
+
             remaining_time -= substep_dt
             self._num_substeps += 1
 
@@ -303,7 +317,7 @@ class WaterTrackModel:
         # final timestep map view
         plt.figure(figsize=(12, 5))
         plt.subplot(1, 3, 1)
-        imshow_grid(self._grid, 'aquifer_thickness', cmap='viridis', colorbar_label='Aquifer Thickness (m)')
+        imshow_grid(self._grid, 'aquifer__thickness', cmap='viridis', colorbar_label='Aquifer Thickness (m)')
 
         plt.subplot(1, 3, 2)
         imshow_grid(self._grid, self._Qdiss, cmap='inferno', colorbar_label='Dissipation (W/m^2)')
