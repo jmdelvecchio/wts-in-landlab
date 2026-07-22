@@ -40,7 +40,7 @@ def calc_wavelenth_1(xt, kf, frozen_grad, rho_w, slope, hydraulic_conductivity):
     """ 
     frozen_grad = abs(frozen_grad)
     sint = np.sin(np.deg2rad(slope))
-    U = hydraulic_conductivity * sint # approximateion of darcy flux
+    U = hydraulic_conductivity * sint # approximation of darcy flux
 
     return 2 * np.pi * xt * ((kf*frozen_grad)/(1.358 * rho_w * 9.81 * sint * U * xt))**(3/5)
 
@@ -62,7 +62,7 @@ def calc_growth_rate_1(xt, kf, L, frozen_grad, rho_w, rho_u, theta, slope, hydra
     """
     frozen_grad = abs(frozen_grad)
     sint = np.sin(np.deg2rad(slope))
-    U = hydraulic_conductivity * sint # approximateion of darcy flux
+    U = hydraulic_conductivity * sint # approximation of darcy flux
     g = 9.81
 
     return (rho_w * g * sint * U) / (rho_u * theta * L) * (1 - 2.991*((kf * frozen_grad)/(rho_w*g*sint*U*xt))**(2/5))

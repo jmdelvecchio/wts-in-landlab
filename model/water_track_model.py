@@ -1,7 +1,7 @@
 """
 Models for water track formation and evolution, including the main model class and supporting functions.
 
-Model class: WaterTrackModel
+Model classes: WaterTrackModelBase, WaterTrackModelBasic, WaterTrackModelThermal
 """
 
 from tqdm import tqdm
@@ -18,8 +18,11 @@ from DupuitLEM.io import (
     write_output_step,
 )
 
-class WaterTrackModel:
-    """A class to model water track formation and evolution on hillslopes.
+
+class WaterTrackModelBase:
+    """Shared hydrology, output, and time-stepping infrastructure for water
+    track models. Subclasses (WaterTrackModelBasic, WaterTrackModelThermal) add
+    their own thermal state and run_step()/make_plots() implementations.
     """
 
     def __init__(self, grid, params, output_dict=None):
@@ -27,8 +30,7 @@ class WaterTrackModel:
         self._grid = grid
         self.params = params
         self.output_dict = output_dict
-        # Initialize other model components here (e.g., groundwater flow, erosion)
-        
+
         self.S0 = params.get('S0', 10) # W/m^2, peak solar irradiance
         self.k_f = params.get('kf', 2.728) # 2.0 W/m/K, frozen soil
         self.k_u = params.get('ku', 1.2682) # 0.5 W/m/K, unfrozen soil
@@ -36,14 +38,8 @@ class WaterTrackModel:
         self.frozen_gradient = params.get('frozen_gradient', 10) # 10 # K/m, temperature gradient in the frozen soil (constant for now)
         self.T_air = params.get('T_air', 0) # C, air temperature (constant for now)
         self.rho_w = params.get('rho_w', 1000) # kg/m^3
-        self.rho_s = params.get('rho_s', 2600) # kg/m^3
-        self.C_s = params.get('C_s', 700) # J/kg/K, specific heat capacity of soil
-        self.C_w = params.get('C_w', 4.2e3) # J/kg/K, specific heat capacity of water at ~5C
         self.phi = params.get('porosity', 0.9) # porosity
 
-        self.C_u = self.phi * self.C_w + (1 - self.phi) * self.C_s # J/kg/K, unfrozen specific heat capacity 
-        self.rho_u = self.phi * self.rho_w + (1 - self.phi) * self.rho_s # kg/m^3, unfrozen density
-        
         self.g = params.get('g', 9.81) # m/s^2
         self.Tm = params.get('Tm', 0) # C, melting temperature
         self.L = params.get('L', 334e3) # J/kg, latent heat of fusion
@@ -55,11 +51,8 @@ class WaterTrackModel:
         self.dt = params.get('dt', 6*3600) # seconds
         self.gwdt = params.get('gwdt', 1e3) # seconds, groundwater model timestep #TODO: make this adaptive based on convergence of groundwater model
         self.T = params.get('T', 180*24*3600) # seconds, total simulation time
-        self.n_steps = int(self.T / self.dt) 
+        self.n_steps = int(self.T / self.dt)
         self._courant_coefficient = params.get('courant_coefficient', 0.5) # coefficient for advection in both gw model and thermal model
-
-        self.use_melt_diffusion = params.get('use_melt_diffusion', False)
-        self.use_steady_hydrology = params.get('use_steady_hydrology', False)
 
         self.gdp = GroundwaterDupuitPercolator(
                     self._grid,
@@ -73,7 +66,6 @@ class WaterTrackModel:
         self._z = self._grid.at_node['topographic__elevation']
         self._zb = self._grid.at_node['aquifer_base__elevation']
         self._zwt = self._grid.at_node['water_table__elevation']
-        self._T_mean = self._grid.at_node['mean_unfrozen__temperature']
         self._h = self._grid.at_node['aquifer__thickness']
 
         self._Qdiss = self._grid.add_zeros('node', 'thermal_dissipation')
@@ -81,31 +73,19 @@ class WaterTrackModel:
         self._b = self._z - self._zb # initialize active layer thickness for use in correction term
         self._zb0 = self._zb.copy()
 
-        # Boundary node bookkeeping. State variables on closed nodes stay at their initial values.
-        # Open (fixed-value) nodes get a dynamic Dirichlet T_mean, set each substep
-        # from the mean of their core neighbors, so heat/geometry can evolve there
-        # too. 
-        self._closed_nodes = self._grid.status_at_node == self._grid.BC_NODE_IS_CLOSED
-        self._open_nodes = self._grid.status_at_node == self._grid.BC_NODE_IS_FIXED_VALUE
+        def verbose_print(*args, **kwargs):
+            if self.params.get('verbose', False):
+                print(*args, **kwargs)
+        self.verbose_print = verbose_print
 
-        open_node_ids = np.where(self._open_nodes)[0]
-        nbrs = self._grid.active_adjacent_nodes_at_node[open_node_ids]  # (n_open, 4), -1 padded
-        valid = nbrs >= 0
-        nbrs_safe = np.where(valid, nbrs, 0)
-        is_core_nbr = valid & (self._grid.status_at_node[nbrs_safe] == self._grid.BC_NODE_IS_CORE)
-
-        self._open_node_ids = open_node_ids
-        self._open_node_neighbors = nbrs_safe            # (n_open, 4)
-        self._open_node_neighbor_mask = is_core_nbr       # (n_open, 4) bool
-        self._open_node_has_core_neighbor = is_core_nbr.any(axis=1)
-
-        # depth-integrated sensible heat, J/m2
-        self._E = self._grid.add_zeros('node', 'sensible_heat_content')
-        self._E = self.C_u * self.rho_u * self._b * (self._T_mean - self.Tm)
-
-        # configure outputs
+    def _configure_output(self, output_dict):
+        """Set up output bookkeeping and (if requested) initialize the output
+        dataset. Subclasses call this as the last line of their __init__,
+        after any fields their own output_fields might reference have been
+        created on the grid.
+        """
         if output_dict:
-            
+
             # set flag to save output, and store output dictionary
             self.save_output = True
             self.output = output_dict
@@ -121,12 +101,6 @@ class WaterTrackModel:
 
         else:
             self.save_output = False
-
-
-        def verbose_print(*args, **kwargs):
-            if self.params.get('verbose', False):
-                print(*args, **kwargs)
-        self.verbose_print = verbose_print
 
     def _initialize_output(self):
         n_output = self.n_steps // self.output_interval
@@ -179,7 +153,148 @@ class WaterTrackModel:
         hydgr_x, hydgr_y = map_link_vector_components_to_node_raster(self._grid, self.gdp._hydr_grad)
         q_x, q_y = map_link_vector_components_to_node_raster(self._grid, self.gdp._q) # get mean value in x and y directions at node
         self._Qdiss = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) # dissipated heat is rho_w g (q dot gradh)
-    
+
+    def run_model(self):
+        """Run the model for the specified total time."""
+
+        self.xslope_var = np.zeros(self.n_steps) # metric for cross slope variability of the water table, which should increase as water tracks form and evolve
+        self.t = np.arange(self.n_steps) * self.dt
+        for step in tqdm(range(self.n_steps)):
+            self.run_step()
+
+            # cross slope variability metric
+            signal = np.std(self._zb.reshape(self._grid.shape), axis=1).mean()
+            self.xslope_var[step] = signal
+
+            if self.save_output and step % self.output_interval == 0:
+                write_output_step(
+                    self._output_ds,
+                    self._grid,
+                    self.output,
+                    self._output_index,
+                )
+
+                self._output_index += 1
+
+                self._output_ds.to_netcdf(self._output_path, mode="a")
+
+
+class WaterTrackModelBasic(WaterTrackModelBase):
+    """A class to model water track formation and evolution on hillslopes,
+    using a simple steady-state flux balance at the permafrost interface
+    (no depth-integrated thermal state or Stefan-condition substepping).
+    """
+
+    def __init__(self, grid, params, output_dict=None):
+        """Initialize the model with a landlab grid and parameters."""
+        super().__init__(grid, params, output_dict)
+
+        self.T_surface = params.get('T_surface', 0) # C, surface temperature (constant for now)
+
+        self._configure_output(output_dict)
+
+    def run_step(self):
+        """Run a single time step of the model."""
+
+        eps = 1e-4 # small value to prevent thickness from going to zero
+
+        # Two options: steady state hydrology or dynamic
+        if self.params.get('steady', False):
+            self.run_hydrology_steady()
+        else:
+            self.run_hydrology_dynamic()
+
+        # Flux terms: solar, frozen, and dissipative
+        # flux_solar = self.S0 +  self.k_u * (self.T_surface - self.Tm) / (self._z - self._zb)  # this version with thickness dependence
+        flux_solar = self.S0 + self.beta * (self.T_air - self.T_surface) # this version assumes steady state in vertical profile: all energy from surface reaches the interface
+        flux_frozen = self.k_f * self.frozen_gradient  # uniform background (frozen gradient is a negative value)
+        flux_dissipation = self._Qdiss  # varies with local flow conditions
+
+        # correction term for flux spreading - melt diffusion
+        gradb = self._grid.calc_grad_at_link(self._b)
+        bprod = map_mean_of_link_nodes_to_link(self._grid, self._dzb_dt * self._b) # map to links for later divergence calculation
+        gradb_x, gradb_y = map_link_vector_components_to_node_raster(self._grid, gradb) # vector components
+        gradb_sq_node = gradb_x**2 + gradb_y**2  # vector magnitude at nodes
+        gradb_sq_link = map_mean_of_link_nodes_to_link(self._grid, gradb_sq_node)  # map to links for later divergence calculation
+        self.melt_diffusion = self._grid.calc_flux_div_at_node((gradb * bprod) / (1 + gradb_sq_link)) # term all together (Warburton et al. 2024)
+
+        # Interface velocity
+        self._dzb_dt = (flux_solar + flux_frozen + flux_dissipation) / (self.rho_w * self.phi * self.L) + self.melt_diffusion  # flux frozen added because value is negative, so it reduces the melt rate
+        self._zb[:] = self._zb - self._dzb_dt * self.dt # note this also updates the boundary condition for the groundwater model, which is important for the feedback to work
+        self._zb[self._zb >= self._z] = self._z[self._zb >= self._z] - eps # make sure refreezing doesn't cause total freezing above the land surface
+
+        # zwt keeps same position, aquifer adds water from deepening of permafrost table, so thickness increases by the melt depth
+        self._h[:] = (self._zwt - self._zb) # update aquifer thickness
+        self._b[:] = self._z - self._zb # update active layer thickness
+
+    def make_plots(self):
+        """Generate plots of the model results."""
+
+        # final timestep map view
+        plt.figure(figsize=(12, 5))
+        plt.subplot(1, 3, 1)
+        imshow_grid(self._grid, 'aquifer__thickness', cmap='viridis', colorbar_label='Aquifer Thickness (m)')
+
+        plt.subplot(1, 3, 2)
+        imshow_grid(self._grid, self._Qdiss, cmap='inferno', colorbar_label='Dissipation (W/m^2)')
+
+        plt.subplot(1, 3, 3)
+        imshow_grid(self._grid, self._z - self._zb, cmap='plasma', colorbar_label='Active Layer Thickness (m)')
+        plt.tight_layout()
+        plt.show()
+
+        # time evolution of cross slope variability
+        plt.figure()
+        plt.plot(self.t, self.xslope_var)
+        plt.xlabel('Time (s)')
+        plt.ylabel('Mean Std Dev of zb in Cross Slope Direction')
+
+
+class WaterTrackModelThermal(WaterTrackModelBase):
+    """A class to model water track formation and evolution on hillslopes,
+    with a depth-integrated thermal state (active layer temperature and
+    Stefan-condition permafrost table evolution).
+    """
+
+    def __init__(self, grid, params, output_dict=None):
+        """Initialize the model with a landlab grid and parameters."""
+        super().__init__(grid, params, output_dict)
+
+        self.rho_s = params.get('rho_s', 2600) # kg/m^3
+        self.C_s = params.get('C_s', 700) # J/kg/K, specific heat capacity of soil
+        self.C_w = params.get('C_w', 4.2e3) # J/kg/K, specific heat capacity of water at ~5C
+
+        self.C_u = self.phi * self.C_w + (1 - self.phi) * self.C_s # J/kg/K, unfrozen specific heat capacity
+        self.rho_u = self.phi * self.rho_w + (1 - self.phi) * self.rho_s # kg/m^3, unfrozen density
+
+        self.use_melt_diffusion = params.get('use_melt_diffusion', False)
+        self.use_steady_hydrology = params.get('use_steady_hydrology', False)
+
+        self._T_mean = self._grid.at_node['mean_unfrozen__temperature']
+
+        # Boundary node bookkeeping. State variables on closed nodes stay at their initial values.
+        # Open (fixed-value) nodes get a dynamic Dirichlet T_mean, set each substep
+        # from the mean of their core neighbors, so heat/geometry can evolve there
+        # too.
+        self._closed_nodes = self._grid.status_at_node == self._grid.BC_NODE_IS_CLOSED
+        self._open_nodes = self._grid.status_at_node == self._grid.BC_NODE_IS_FIXED_VALUE
+
+        open_node_ids = np.where(self._open_nodes)[0]
+        nbrs = self._grid.active_adjacent_nodes_at_node[open_node_ids]  # (n_open, 4), -1 padded
+        valid = nbrs >= 0
+        nbrs_safe = np.where(valid, nbrs, 0)
+        is_core_nbr = valid & (self._grid.status_at_node[nbrs_safe] == self._grid.BC_NODE_IS_CORE)
+
+        self._open_node_ids = open_node_ids
+        self._open_node_neighbors = nbrs_safe            # (n_open, 4)
+        self._open_node_neighbor_mask = is_core_nbr       # (n_open, 4) bool
+        self._open_node_has_core_neighbor = is_core_nbr.any(axis=1)
+
+        # depth-integrated sensible heat, J/m2
+        self._E = self._grid.add_zeros('node', 'sensible_heat_content')
+        self._E = self.C_u * self.rho_u * self._b * (self._T_mean - self.Tm)
+
+        self._configure_output(output_dict)
 
     def _update_open_boundary_temperature(self):
         """Set T_mean at open (fixed-value) boundary nodes to the mean of their
@@ -332,30 +447,6 @@ class WaterTrackModel:
         # Update derived geometric quantities
         self._h[:] = self._zwt - self._zb  # aquifer thickness
         self._b[:] = self._z - self._zb    # active layer thickness
-
-    def run_model(self):
-        """Run the model for the specified total time."""
-
-        self.xslope_var = np.zeros(self.n_steps) # metric for cross slope variability of the water table, which should increase as water tracks form and evolve
-        self.t = np.arange(self.n_steps) * self.dt
-        for step in tqdm(range(self.n_steps)):
-            self.run_step()
-
-            # cross slope variability metric
-            signal = np.std(self._zb.reshape(self._grid.shape), axis=1).mean()
-            self.xslope_var[step] = signal
-            
-            if self.save_output and step % self.output_interval == 0:
-                write_output_step(
-                    self._output_ds,
-                    self._grid,
-                    self.output,
-                    self._output_index,
-                )
-
-                self._output_index += 1
-
-                self._output_ds.to_netcdf(self._output_path, mode="a")
 
     def make_plots(self):
         """Generate plots of the model results."""

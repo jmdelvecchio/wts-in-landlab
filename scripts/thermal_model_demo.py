@@ -6,7 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from landlab import RasterModelGrid, imshow_grid
-from model.water_track_model import WaterTrackModel
+from model.water_track_model import WaterTrackModelThermal
 
 #%%
 
@@ -47,7 +47,7 @@ params['hydraulic_conductivity'] = 1e-2 # hydraulic conductivity (constant, unif
 params['verbose'] = True
 params['max_iter'] = 5000
 
-wtm = WaterTrackModel(mg, params)
+wtm = WaterTrackModelThermal(mg, params)
 
 # %%
 

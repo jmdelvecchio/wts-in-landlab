@@ -8,7 +8,7 @@ Run with:  pytest test_thermal_model.py -v
 import numpy as np
 import pytest
 from landlab import RasterModelGrid
-from model.water_track_model import WaterTrackModel  
+from model.water_track_model import WaterTrackModelThermal
 
 #%%
 
@@ -20,7 +20,7 @@ class _Stub:
 def make_model(grid, dt=3600.0, **overrides):
     """
     Build a minimal stub with every attribute that run_heat_transport reads
-    from self.  The method is borrowed directly from WaterTrackModel so
+    from self.  The method is borrowed directly from WaterTrackModelThermal so
     no implementation is duplicated.
 
     Defaults are Toolik-like values from Warburton et al. (2026).
@@ -74,7 +74,7 @@ def make_model(grid, dt=3600.0, **overrides):
     m.gdp._q  = np.zeros(nl)   # no lateral flow
     m.gdp._vel = np.zeros(nl)
 
-    # boundary node bookkeeping, mirroring WaterTrackModel.__init__ exactly so
+    # boundary node bookkeeping, mirroring WaterTrackModelThermal.__init__ exactly so
     # closed/open node handling in run_heat_transport works on the stub too.
     m._closed_nodes = grid.status_at_node == grid.BC_NODE_IS_CLOSED
     m._open_nodes = grid.status_at_node == grid.BC_NODE_IS_FIXED_VALUE
@@ -90,7 +90,7 @@ def make_model(grid, dt=3600.0, **overrides):
     m._open_node_neighbor_mask = is_core_nbr
     m._open_node_has_core_neighbor = is_core_nbr.any(axis=1)
     m._update_open_boundary_temperature = (
-        lambda: WaterTrackModel._update_open_boundary_temperature(m)
+        lambda: WaterTrackModelThermal._update_open_boundary_temperature(m)
     )
 
     # apply per-test overrides
@@ -102,7 +102,7 @@ def make_model(grid, dt=3600.0, **overrides):
 
 def _run(m):
     """Invoke the real run_heat_transport on the stub."""
-    WaterTrackModel.run_heat_transport(m)
+    WaterTrackModelThermal.run_heat_transport(m)
 
 
 # ============================================================

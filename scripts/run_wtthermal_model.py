@@ -13,7 +13,7 @@ import matplotlib.pyplot as plt
 
 from landlab import RasterModelGrid, imshow_grid
 from water_track_funcs import calc_growth_rate_1, calc_wavelenth_1, notional_equilibrium_temperature
-from model.water_track_model import WaterTrackModel
+from model.water_track_model import WaterTrackModelThermal
 
 #%%
 # grid and initial conditions
@@ -146,10 +146,10 @@ plt.show()
 
 # copy scripts to output location
 shutil.copy('../model/water_track_model.py', output['base_output_path'] + f"water_track_model_{output['run_id']}.py")
-shutil.copy('./run_steady_model.py', output['base_output_path'] + f"run_steady_model_{output['run_id']}.py")
+shutil.copy('./run_wtthermal_model.py', output['base_output_path'] + f"run_wtthermal_model_{output['run_id']}.py")
 
-# mdl = WaterTrackModel(mg, params, output_dict=output)
-mdl = WaterTrackModel(mg, params)
+# mdl = WaterTrackModelThermal(mg, params, output_dict=output)
+mdl = WaterTrackModelThermal(mg, params)
 if params['use_steady_hydrology']:
     mdl.run_hydrology_steady()
 else:
