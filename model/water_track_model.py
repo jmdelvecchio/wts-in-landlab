@@ -4,6 +4,8 @@ Models for water track formation and evolution, including the main model class a
 Model classes: WaterTrackModelBase, WaterTrackModelBasic, WaterTrackModelThermal
 """
 
+import os
+
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
@@ -17,6 +19,19 @@ from DupuitLEM.io import (
     initialize_output_dataset,
     write_output_step,
 )
+
+
+def _save_or_show(save_path, name):
+    """Save the current figure into save_path/name.png, or show it
+    interactively if save_path is None. Used by make_plots() so figures can
+    be persisted from headless/parallel runs.
+    """
+    if save_path:
+        os.makedirs(save_path, exist_ok=True)
+        plt.savefig(os.path.join(save_path, f"{name}.png"))
+        plt.close()
+    else:
+        plt.show()
 
 
 class WaterTrackModelBase:
@@ -154,12 +169,22 @@ class WaterTrackModelBase:
         q_x, q_y = map_link_vector_components_to_node_raster(self._grid, self.gdp._q) # get mean value in x and y directions at node
         self._Qdiss = Q_coeff * np.abs(q_x * hydgr_x + q_y * hydgr_y) # dissipated heat is rho_w g (q dot gradh)
 
-    def run_model(self):
-        """Run the model for the specified total time."""
+    def run_model(self, tqdm_position=None, tqdm_desc=None):
+        """Run the model for the specified total time.
+
+        Parameters
+        ----------
+        tqdm_position, tqdm_desc : optional
+            Forwarded to tqdm. Set these when running several instances
+            concurrently (e.g. from separate processes in a parallel sweep)
+            so each gets its own stable progress-bar line instead of all of
+            them redrawing over the same one. Leave unset for a single
+            interactive run.
+        """
 
         self.xslope_var = np.zeros(self.n_steps) # metric for cross slope variability of the water table, which should increase as water tracks form and evolve
         self.t = np.arange(self.n_steps) * self.dt
-        for step in tqdm(range(self.n_steps)):
+        for step in tqdm(range(self.n_steps), position=tqdm_position, desc=tqdm_desc):
             self.run_step()
 
             # cross slope variability metric
@@ -190,6 +215,7 @@ class WaterTrackModelBasic(WaterTrackModelBase):
         super().__init__(grid, params, output_dict)
 
         self.T_surface = params.get('T_surface', 0) # C, surface temperature (constant for now)
+        self.use_melt_diffusion = params.get('use_melt_diffusion', True)
 
         self._configure_output(output_dict)
 
@@ -199,7 +225,7 @@ class WaterTrackModelBasic(WaterTrackModelBase):
         eps = 1e-4 # small value to prevent thickness from going to zero
 
         # Two options: steady state hydrology or dynamic
-        if self.params.get('steady', False):
+        if self.params.get('use_steady_hydrology', False):
             self.run_hydrology_steady()
         else:
             self.run_hydrology_dynamic()
@@ -211,12 +237,15 @@ class WaterTrackModelBasic(WaterTrackModelBase):
         flux_dissipation = self._Qdiss  # varies with local flow conditions
 
         # correction term for flux spreading - melt diffusion
-        gradb = self._grid.calc_grad_at_link(self._b)
-        bprod = map_mean_of_link_nodes_to_link(self._grid, self._dzb_dt * self._b) # map to links for later divergence calculation
-        gradb_x, gradb_y = map_link_vector_components_to_node_raster(self._grid, gradb) # vector components
-        gradb_sq_node = gradb_x**2 + gradb_y**2  # vector magnitude at nodes
-        gradb_sq_link = map_mean_of_link_nodes_to_link(self._grid, gradb_sq_node)  # map to links for later divergence calculation
-        self.melt_diffusion = self._grid.calc_flux_div_at_node((gradb * bprod) / (1 + gradb_sq_link)) # term all together (Warburton et al. 2024)
+        if self.use_melt_diffusion:
+            gradb = self._grid.calc_grad_at_link(self._b)
+            bprod = map_mean_of_link_nodes_to_link(self._grid, self._dzb_dt * self._b) # map to links for later divergence calculation
+            gradb_x, gradb_y = map_link_vector_components_to_node_raster(self._grid, gradb) # vector components
+            gradb_sq_node = gradb_x**2 + gradb_y**2  # vector magnitude at nodes
+            gradb_sq_link = map_mean_of_link_nodes_to_link(self._grid, gradb_sq_node)  # map to links for later divergence calculation
+            self.melt_diffusion = self._grid.calc_flux_div_at_node((gradb * bprod) / (1 + gradb_sq_link)) # term all together (Warburton et al. 2024)
+        else:
+            self.melt_diffusion = 0.0
 
         # Interface velocity
         self._dzb_dt = (flux_solar + flux_frozen + flux_dissipation) / (self.rho_w * self.phi * self.L) + self.melt_diffusion  # flux frozen added because value is negative, so it reduces the melt rate
@@ -227,8 +256,15 @@ class WaterTrackModelBasic(WaterTrackModelBase):
         self._h[:] = (self._zwt - self._zb) # update aquifer thickness
         self._b[:] = self._z - self._zb # update active layer thickness
 
-    def make_plots(self):
-        """Generate plots of the model results."""
+    def make_plots(self, save_path=None):
+        """Generate plots of the model results.
+
+        Parameters
+        ----------
+        save_path : str, optional
+            If given, save each figure into this directory instead of
+            displaying it interactively (for use in headless/parallel runs).
+        """
 
         # final timestep map view
         plt.figure(figsize=(12, 5))
@@ -241,13 +277,22 @@ class WaterTrackModelBasic(WaterTrackModelBase):
         plt.subplot(1, 3, 3)
         imshow_grid(self._grid, self._z - self._zb, cmap='plasma', colorbar_label='Active Layer Thickness (m)')
         plt.tight_layout()
-        plt.show()
+        _save_or_show(save_path, 'thickness_qdiss_activelayer')
 
         # time evolution of cross slope variability
         plt.figure()
         plt.plot(self.t, self.xslope_var)
         plt.xlabel('Time (s)')
         plt.ylabel('Mean Std Dev of zb in Cross Slope Direction')
+        _save_or_show(save_path, 'xslope_var')
+
+
+        vels = abs(self.gdp._vel)
+        plt.figure(figsize=(5, 3))
+        plt.hist(np.log10(vels[vels > 0]), bins=50, density=True)
+        plt.xlabel('log10(Darcy velocity) (m/s)')
+        plt.ylabel('Probability density')
+        _save_or_show(save_path, 'vel_distribution')
 
 
 class WaterTrackModelThermal(WaterTrackModelBase):
@@ -358,6 +403,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
             flux_div_Tq = self._grid.calc_flux_div_at_node(adv_flux)
             flux_div_q = self._grid.calc_flux_div_at_node(self.gdp._q)
             lateral_advection = flux_div_Tq - self._T_mean * flux_div_q  # K m/s at nodes
+            # lateral_advection = np.zeros_like(self._T_mean)
 
             # Top boundary condition [W/m2]
             BC_top = self.S0 + self.beta * (self.T_air - self._T_mean)
@@ -365,6 +411,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
             # Bottom boundary condition: heat flux from active layer to interface [W/m2]
             # Linear approximation to temperature profile, T drops from T_mean to Tm over b/2
             flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (b_local / 2)
+            # flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (np.mean(b_local / 2))
 
             # calculate courant minimum timestep
             dt_courant = self._courant_coefficient * np.min(
@@ -448,8 +495,15 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         self._h[:] = self._zwt - self._zb  # aquifer thickness
         self._b[:] = self._z - self._zb    # active layer thickness
 
-    def make_plots(self):
-        """Generate plots of the model results."""
+    def make_plots(self, save_path=None):
+        """Generate plots of the model results.
+
+        Parameters
+        ----------
+        save_path : str, optional
+            If given, save each figure into this directory instead of
+            displaying it interactively (for use in headless/parallel runs).
+        """
 
         # final timestep map view
         plt.figure(figsize=(12, 5))
@@ -468,7 +522,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         maxb = np.max(self._b[self._grid.core_nodes])
         imshow_grid(self._grid, self._b, cmap='plasma', colorbar_label='Active Layer Thickness (m)', vmin=minb, vmax=maxb)
         plt.tight_layout()
-        plt.show()
+        _save_or_show(save_path, 'thickness_qdiss_activelayer')
 
 
         # final timestep map view
@@ -488,7 +542,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         maxb = np.max(self._b[self._grid.core_nodes])
         imshow_grid(self._grid, self._b, cmap='plasma', colorbar_label='Active Layer Thickness (m)', vmin=minb, vmax=maxb)
         plt.tight_layout()
-        plt.show()
+        _save_or_show(save_path, 'tmean_dzbdt_activelayer')
 
 
         # time evolution of cross slope variability
@@ -496,4 +550,13 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         plt.plot(self.t, self.xslope_var)
         plt.xlabel('Time (s)')
         plt.ylabel('Mean Std Dev of zb in Cross Slope Direction')
+        plt.tight_layout()
+        _save_or_show(save_path, 'xslope_var')
+
+        vels = abs(self.gdp._vel)
+        plt.figure(figsize=(5, 3))
+        plt.hist(np.log10(vels[vels > 0]), bins=50, density=True)
+        plt.xlabel('log10(Darcy velocity) (m/s)')
+        plt.ylabel('Probability density')
+        _save_or_show(save_path, 'vel_distribution')
 

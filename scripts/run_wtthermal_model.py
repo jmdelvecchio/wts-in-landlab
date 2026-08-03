@@ -12,13 +12,14 @@ from scipy import signal
 import matplotlib.pyplot as plt
 
 from landlab import RasterModelGrid, imshow_grid
+from landlab.grid.raster_mappers import map_link_vector_components_to_node_raster
 from water_track_funcs import calc_growth_rate_1, calc_wavelenth_1, notional_equilibrium_temperature
 from model.water_track_model import WaterTrackModelThermal
 
 #%%
 # grid and initial conditions
 boundaries = {"top": "open", "left": "closed", "bottom": "closed", "right": "closed"}
-Nx = 100; Ny = 150; dx = 10
+Nx = 100; Ny = 200; dx = 10
 mg = RasterModelGrid((Ny,Nx), xy_spacing=dx, bc=boundaries)
 z = mg.add_zeros('topographic__elevation', at='node')
 zb = mg.add_zeros('aquifer_base__elevation', at='node')
@@ -56,7 +57,7 @@ params['courant_coefficient'] = 0.5
 # params['tol'] = 1e-10 # tolerance for numerical solvers
 # params['max_iter'] = 20 # maximum iterations for numerical solvers
 
-params['use_melt_diffusion'] = False
+params['use_melt_diffusion'] = True
 params['use_steady_hydrology'] = False
 
 ## parameters generally kept constant:
@@ -83,7 +84,7 @@ output["output_fields"] = [
         "at_node:aquifer_base__elevation",
         "at_node:water_table__elevation",
         ]
-output["base_output_path"] = '/Users/tuv05476/Documents/Research Data/Local/water-tracks/wtm_steady_'
+output["base_output_path"] = '/Users/tuv05476/Documents/Research Data/Local/water-tracks/wtm_thermal_'
 
 # get latest run ID so not to overwrite existing
 matching_files = glob.glob(f"{output['base_output_path']}*.nc")
@@ -100,9 +101,9 @@ print(f'Current run ID: {output["run_id"]}')
 #%%
 ## Introduce random fluctuations to base elevation to seed water track formation
 lam = 5 # correlation length for the random field
-alpha = 0.01 # scaling factor for the random field
+alpha = 0.01 # scaling factor for the random field #0.002
 # fluct =  alpha * generate_correlated_random_field(Ny, Nx, lam/dx * 2, 2142025).flatten()
-fluct = alpha * np.random.randn(Ny, Nx).flatten()
+# fluct = alpha * np.random.randn(Ny, Nx).flatten()
 
 # calc average slope of hillslope
 slope = np.arctan(np.mean(np.abs(np.gradient(z.reshape(mg.shape), dx, axis=0))))
@@ -118,10 +119,10 @@ print(f'Wavelength: {round(wavelength, 2)} meters')
 print(f'Growth rate: {3600*24*365*growth_rate:.2e} meters/year')
 
 
-# wavelength_target = round(wavelength, 2)*2.0  # meters
-# kappa = 2 * np.pi / wavelength_target
-# amplitude = 0.01  # small perturbation, meters
-# fluct = amplitude * np.sin(kappa * mg.x_of_node)
+wavelength_target = round(wavelength, 2) # meters
+kappa = 2 * np.pi / wavelength_target
+amplitude = 0.01  # small perturbation, meters
+fluct = amplitude * np.sin(kappa * mg.x_of_node)
 
 zb0 = zb.copy()
 
@@ -148,8 +149,8 @@ plt.show()
 shutil.copy('../model/water_track_model.py', output['base_output_path'] + f"water_track_model_{output['run_id']}.py")
 shutil.copy('./run_wtthermal_model.py', output['base_output_path'] + f"run_wtthermal_model_{output['run_id']}.py")
 
-# mdl = WaterTrackModelThermal(mg, params, output_dict=output)
-mdl = WaterTrackModelThermal(mg, params)
+mdl = WaterTrackModelThermal(mg, params, output_dict=output)
+# mdl = WaterTrackModelThermal(mg, params)
 if params['use_steady_hydrology']:
     mdl.run_hydrology_steady()
 else:
@@ -183,22 +184,24 @@ mdl.run_model()
 # %%
 
 mdl.make_plots()
+# mdl.make_plots(save_path=output['base_output_path'] + f"wtbasic_model_{output['run_id']}")
+
 # %%
 
 plt.figure(figsize=(15,5))
 plt.subplot(1, 3, 2)
-imshow_grid(mg, mdl._z - mdl._zb, cmap='plasma', colorbar_label='Active layer thickness (m)', vmin=0.7, vmax=0.8)
+imshow_grid(mg, mdl._z - mdl._zb, cmap='plasma', colorbar_label='Active layer thickness (m)', vmin=0.5, vmax=0.6)
 
 #%%
 
 plt.figure(figsize=(15,5))
 plt.subplot(1, 3, 2)
-imshow_grid(mg, mdl._T_mean, cmap='plasma', colorbar_label='Temperature (C)', vmin=10, vmax=10.5)
+imshow_grid(mg, mdl._T_mean, cmap='plasma', colorbar_label='Temperature (C)', vmin=5.5, vmax=6.5)
 
 # %%
 plt.figure(figsize=(15,5))
 plt.subplot(1, 3, 2)
-imshow_grid(mg, mdl._dzb_dt, cmap='plasma', colorbar_label='Base melt rate (m/s)', vmin=1.8e-8, vmax=2e-8)
+imshow_grid(mg, mdl._dzb_dt, cmap='plasma', colorbar_label='Base melt rate (m/s)', vmin=0, vmax=5e-9)
 
 # %%
 
@@ -221,7 +224,7 @@ plt.figure()
 zb = mdl._zb.reshape(mg.shape)
 colors = plt.cm.viridis(np.linspace(0, 1, N))
 for i in range(N):
-    frequencies, psd = signal.welch(zb[i, 5:-5], 1/dx, nperseg=128)
+    frequencies, psd = signal.welch(zb[i, 5:-5], 1/dx, nperseg=70)
     plt.loglog(1/frequencies[1:], psd[1:], color=colors[i], alpha=0.2)
 plt.xlabel('Length (m)')
 plt.ylabel('Power/Frequency (m^2 / 1/m)')
@@ -246,5 +249,26 @@ plt.show()
 
 plt.subplot(1, 3, 2)
 imshow_grid(mg, np.log10(abs(mdl._dzb_dt - np.mean(mdl._dzb_dt))), cmap='inferno', colorbar_label='Interface Velocity (m/s)')
+
+# %%
+
+vels = abs(mdl.gdp._vel)
+plt.figure(figsize=(5, 3))
+plt.hist(np.log10(vels[vels > 0]), bins=50, density=True)
+plt.xlabel('log10(Darcy velocity) (m/s)')
+plt.ylabel('Probability density')
+
+
+v_x, v_y = map_link_vector_components_to_node_raster(mdl._grid, mdl.gdp._vel) # get mean value in x and y directions at node
+
+
+
+plt.figure(figsize=(8, 5))
+plt.subplot(1, 2, 1)
+imshow_grid(mg, np.log10(abs(v_x[mg.core_nodes])), cmap='Blues', colorbar_label='Darcy velocity x-component (m/s)', vmin=-8, vmax=-1.5)
+
+plt.subplot(1, 2, 2)
+imshow_grid(mg, np.log10(abs(v_y[mg.core_nodes])), cmap='Blues', colorbar_label='Darcy velocity y-component (m/s)', vmin=-8, vmax=-1.5)
+
 
 # %%

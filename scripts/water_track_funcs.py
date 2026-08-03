@@ -10,6 +10,16 @@ from scipy.signal import welch
 import numpy as np
 from scipy import optimize
 
+def net_energy_flux(mdl, mg):
+    
+    ## Check the domain-mean energy balance implied by the hydrology solution before
+    ## running the full model: is this parameter combination even in a growth (thawing)
+    ## regime, or will the active layer refreeze?
+    
+    flux_frozen = mdl.k_f * mdl.frozen_gradient
+    Qdiss_mean = mdl._Qdiss[mg.core_nodes].mean()
+    BC_top_mean = (mdl.S0 + mdl.beta * (mdl.T_air - mdl._T_mean))[mg.core_nodes].mean()
+    net_flux = Qdiss_mean + BC_top_mean - flux_frozen
 
 def notional_equilibrium_temperature(S0, beta, T_air, kf, frozen_gradient):
     """
