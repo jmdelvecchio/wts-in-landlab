@@ -57,8 +57,9 @@ params['courant_coefficient'] = 0.5
 # params['tol'] = 1e-10 # tolerance for numerical solvers
 # params['max_iter'] = 20 # maximum iterations for numerical solvers
 
-params['use_melt_diffusion'] = True
+params['use_melt_diffusion'] = False
 params['use_steady_hydrology'] = False
+params['use_fourier_frozen_gradient'] = True
 
 ## parameters generally kept constant:
 params['kf'] = 2.728 # W/m/K, frozen soil
@@ -103,7 +104,7 @@ print(f'Current run ID: {output["run_id"]}')
 lam = 5 # correlation length for the random field
 alpha = 0.01 # scaling factor for the random field #0.002
 # fluct =  alpha * generate_correlated_random_field(Ny, Nx, lam/dx * 2, 2142025).flatten()
-# fluct = alpha * np.random.randn(Ny, Nx).flatten()
+fluct = alpha * np.random.randn(Ny, Nx).flatten()
 
 # calc average slope of hillslope
 slope = np.arctan(np.mean(np.abs(np.gradient(z.reshape(mg.shape), dx, axis=0))))
@@ -119,10 +120,10 @@ print(f'Wavelength: {round(wavelength, 2)} meters')
 print(f'Growth rate: {3600*24*365*growth_rate:.2e} meters/year')
 
 
-wavelength_target = round(wavelength, 2) # meters
-kappa = 2 * np.pi / wavelength_target
-amplitude = 0.01  # small perturbation, meters
-fluct = amplitude * np.sin(kappa * mg.x_of_node)
+# wavelength_target = round(wavelength, 2) # meters
+# kappa = 2 * np.pi / wavelength_target
+# amplitude = 0.01  # small perturbation, meters
+# fluct = amplitude * np.sin(kappa * mg.x_of_node)
 
 zb0 = zb.copy()
 
@@ -132,15 +133,22 @@ zwt[:] = zb + 0.5 # near equilibrium thickness
 
 # spectral analysis across the hillslope
 plt.figure()
-zb = zb.reshape(mg.shape)
-N = zb.shape[0]
+zb1 = zb.reshape(mg.shape)
+N = zb1.shape[0]
 colors = plt.cm.viridis(np.linspace(0, 1, N))
 for i in range(N):
-    frequencies, psd = signal.welch(zb[i, 5:-5], 1/dx, nperseg=128)
+    frequencies, psd = signal.welch(zb1[i, 5:-5], 1/dx, nperseg=128)
     plt.loglog(1/frequencies[1:], psd[1:], color=colors[i], alpha=0.2)
 plt.xlabel('Length (m)')
 plt.ylabel('Power/Frequency (m^2 / 1/m)')
 plt.title('Initial Power Spectral Density')
+plt.show()
+
+
+#%%
+
+plt.figure()
+imshow_grid(mg, z-zb, colorbar_label="Topographic Elevation (m)")
 plt.show()
 
 #%%
@@ -190,18 +198,18 @@ mdl.make_plots()
 
 plt.figure(figsize=(15,5))
 plt.subplot(1, 3, 2)
-imshow_grid(mg, mdl._z - mdl._zb, cmap='plasma', colorbar_label='Active layer thickness (m)', vmin=0.5, vmax=0.6)
+imshow_grid(mg, mdl._z - mdl._zb, cmap='plasma', colorbar_label='Active layer thickness (m)', vmin=0.5, vmax=0.7)
 
 #%%
 
 plt.figure(figsize=(15,5))
 plt.subplot(1, 3, 2)
-imshow_grid(mg, mdl._T_mean, cmap='plasma', colorbar_label='Temperature (C)', vmin=5.5, vmax=6.5)
+imshow_grid(mg, mdl._T_mean, cmap='plasma', colorbar_label='Temperature (C)') #, vmin=5.5, vmax=6.5)
 
 # %%
 plt.figure(figsize=(15,5))
 plt.subplot(1, 3, 2)
-imshow_grid(mg, mdl._dzb_dt, cmap='plasma', colorbar_label='Base melt rate (m/s)', vmin=0, vmax=5e-9)
+imshow_grid(mg, mdl._dzb_dt, cmap='plasma', colorbar_label='Base melt rate (m/s)') #, vmin=0, vmax=5e-9)
 
 # %%
 

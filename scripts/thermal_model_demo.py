@@ -22,9 +22,9 @@ tmean[mg.y_of_node > 900] = 2
 tmean[np.logical_and(mg.x_of_node == 250, mg.y_of_node > 400)] = 2
 
 a = 0.05
-b = 5 # permeable thickness m
+b = 10 # permeable thickness m
 
-z[:] = a * mg.y_of_node + 0.2 * np.random.randn(len(z))
+z[:] = a * mg.y_of_node #+ 0.2 * np.random.randn(len(z))
 zb[:] = z - b
 zwt[:] = z - 0.5 * b
 plt.figure()
@@ -40,14 +40,17 @@ params['dt'] = 1*3600 # seconds
 params['dtgw'] = 100*6*3600 # seconds
 params['T'] = 180 * 24 * 3600
 params['courant_coefficient'] = 0.1
+params['regularization_f'] = 0.001
 # params['ku'] = 0.00001
 
 params['recharge_rate'] = 5.0e-7 # recharge rate (constant, uniform here) m/s
-params['hydraulic_conductivity'] = 1e-2 # hydraulic conductivity (constant, uniform here) m/s
+params['hydraulic_conductivity'] = 1e-3 # hydraulic conductivity (constant, uniform here) m/s
 params['verbose'] = True
 params['max_iter'] = 5000
 
 wtm = WaterTrackModelThermal(mg, params)
+
+
 
 # %%
 
@@ -57,13 +60,15 @@ wtm.run_hydrology_steady()
 
 plt.figure()
 imshow_grid(mg, zwt-zb, colorbar_label="Aquifer thickness (m)")
+plt.show()
 
 plt.figure()
 imshow_grid(mg, z-zwt, colorbar_label="Depth to wt (m)")
+plt.show()
 
 plt.figure()
 imshow_grid(mg, "surface_water__specific_discharge", colorbar_label="Surface water specific discharge (m/s)")
-
+plt.show()
 
 
 # %%

@@ -1,6 +1,9 @@
 *.pdf
 *.xlsx
-heating.ipynb
 *.pyc
 __pycache__/
 *.egg-info
+cache
+.claude
+.pytest_cache
+.vscode

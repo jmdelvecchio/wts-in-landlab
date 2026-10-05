@@ -74,7 +74,7 @@ class WaterTrackModelBase:
                     recharge_rate=self.params['recharge_rate'],
                     hydraulic_conductivity=self.params['hydraulic_conductivity'],
                     porosity=self.phi,
-                    regularization_f=0.1,
+                    regularization_f=params.get('regularization_f', 0.01),
                     # vn_coefficient=0.2
                     courant_coefficient=self._courant_coefficient
                     )
@@ -314,6 +314,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
 
         self.use_melt_diffusion = params.get('use_melt_diffusion', False)
         self.use_steady_hydrology = params.get('use_steady_hydrology', False)
+        self.use_fourier_frozen_gradient = params.get('use_fourier_frozen_gradient', False)
 
         self._T_mean = self._grid.at_node['mean_unfrozen__temperature']
 
@@ -339,6 +340,9 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         self._E = self._grid.add_zeros('node', 'sensible_heat_content')
         self._E = self.C_u * self.rho_u * self._b * (self._T_mean - self.Tm)
 
+        # matrix for computing 2D FFT of state variables:
+        self._fft_A = self._make_fft_matrix()
+
         self._configure_output(output_dict)
 
     def _update_open_boundary_temperature(self):
@@ -361,6 +365,18 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         counts = mask.sum(axis=1)
         self._T_mean[ids] = nbr_vals.sum(axis=1) / counts
 
+    def _make_fft_matrix(self):
+        """Make a matrix for computing the 2D FFT of grid state variables.
+        Used for computing the power spectrum of b (or zb) for update to frozen 
+        gradient in the thermal model.
+        """
+        Ny, Nx = self._grid.shape
+        kx = np.fft.fftfreq(Nx, d=self._grid.dx)
+        ky = np.fft.fftfreq(Ny, d=self._grid.dy)
+        kx, ky = np.meshgrid(kx, ky)
+        A = np.sqrt(kx**2 + ky**2)
+        return A
+
     def run_heat_transport(self):
         """
         Update depth-averaged active layer temperature T_mean for one timestep dt, using 
@@ -375,8 +391,6 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         where the Stefan condition at the base gives dzb_dt. The term [div (T q) - T div q]
         comes from the product rule: q grad T = div (T q) - T div q
         """
-
-        flux_frozen = self.k_f * self.frozen_gradient  # W/m2
 
         remaining_time = self.dt
         self._num_substeps = 0
@@ -410,19 +424,8 @@ class WaterTrackModelThermal(WaterTrackModelBase):
 
             # Bottom boundary condition: heat flux from active layer to interface [W/m2]
             # Linear approximation to temperature profile, T drops from T_mean to Tm over b/2
-            flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (b_local / 2)
-            # flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (np.mean(b_local / 2))
-
-            # calculate courant minimum timestep
-            dt_courant = self._courant_coefficient * np.min(
-                np.divide(
-                    self._grid.length_of_link,
-                    abs(self.gdp._vel),
-                    where=abs(self.gdp._vel) > 0,
-                    out=np.ones_like(self.gdp._vel) * 1e15,
-                )
-            )
-            substep_dt = min([dt_courant, remaining_time])
+            self.flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (b_local / 2)
+            # self.flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (np.mean(b_local / 2))
 
             # Stefan condition: local interface velocity for this substep [m/s]
             if self.use_melt_diffusion:
@@ -435,7 +438,24 @@ class WaterTrackModelThermal(WaterTrackModelBase):
             else:
                 self.melt_diffusion = 0.0
 
-            db_dt_local = (flux_unfrozen - flux_frozen) / (self.rho_w * self.phi * self.L) + self.melt_diffusion
+            if self.use_fourier_frozen_gradient:
+                # convert thickness to fourier domain (reshape to 2D)
+                b_fft = np.fft.fft2(b_local.reshape(self._grid.shape))
+
+                # product with precomputed matrix for frozen gradient coefficient
+                Ab_fft = np.multiply(self._fft_A, b_fft)
+
+                # convert back to spatial domain (flatten for landlab grid)
+                self.frozen_grad_coef = np.real(np.fft.ifft2(Ab_fft)).flatten()
+
+                # scale the frozen gradient by the coefficient
+                frozen_grad = self.frozen_gradient * (1 + self.frozen_grad_coef) # check sign (+/-)?
+                self.flux_frozen = self.k_f * frozen_grad  # W/m2
+            else:
+                self.flux_frozen = self.k_f * self.frozen_gradient  # W/m2
+
+            # db_dt_local = (self.flux_unfrozen - self.flux_frozen) / (self.rho_w * self.phi * self.L) + self.melt_diffusion
+            db_dt_local = (self.flux_unfrozen - self.flux_frozen + self._Qdiss) / (self.rho_w * self.phi * self.L) + self.melt_diffusion # put flux right on the boundary
             # Closed nodes carry no flux so do not evolve
             db_dt_local[self._closed_nodes] = 0.0
 
@@ -443,17 +463,29 @@ class WaterTrackModelThermal(WaterTrackModelBase):
             # Newly thawed material enters at Tm, contributing zero to E.
             dE_dt = (
                 lateral_diffusion
-                + self._Qdiss
+                # + self._Qdiss # remove if putting the Qdiss in the interface term
                 + BC_top
-                - flux_unfrozen
+                - self.flux_frozen
                 - self.C_u * self.rho_u * lateral_advection
             )
+
+            # calculate courant minimum timestep
+            dt_courant = self._courant_coefficient * np.min(
+                np.divide(
+                    self._grid.length_of_link,
+                    abs(self.gdp._vel),
+                    where=abs(self.gdp._vel) > 0,
+                    out=np.ones_like(self.gdp._vel) * 1e15,
+                )
+            )
+            substep_dt = min([dt_courant, remaining_time])
+
             self._E[self._grid.core_nodes] += dE_dt[self._grid.core_nodes] * substep_dt
 
             # advance the local geometry
-            b_local = b_local + db_dt_local * substep_dt
+            b_local += db_dt_local * substep_dt
 
-            # recover T_mean diagnostically from updated E and b_local
+            # recover T_mean from updated E and b_local
             self._T_mean[self._grid.core_nodes] = (
                 self.Tm + self._E[self._grid.core_nodes] / (self.C_u * self.rho_u * b_local[self._grid.core_nodes])
             )
