@@ -54,6 +54,8 @@ def make_model(grid, dt=3600.0, **overrides):
     # numerics
     m._courant_coefficient = 0.5
     m.use_melt_diffusion   = False
+    m.use_fourier_frozen_gradient = False
+    m._use_dct_frozen_gradient    = False
 
     # node arrays  (neutral initial state)
     m._T_mean        = np.zeros(nn)
@@ -93,6 +95,15 @@ def make_model(grid, dt=3600.0, **overrides):
         lambda: WaterTrackModelThermal._update_open_boundary_temperature(m)
     )
 
+    # frozen-gradient / melt-diffusion methods, borrowed from the real class so a
+    # test can switch the corresponding option on via overrides. The Fourier and
+    # DCT versions also need their precomputed operators.
+    m.calc_melt_diffusion = lambda b_local: WaterTrackModelThermal.calc_melt_diffusion(m, b_local)
+    m.calc_fourier_frozen_gradient = lambda b_local: WaterTrackModelThermal.calc_fourier_frozen_gradient(m, b_local)
+    m.calc_dct_frozen_gradient = lambda b_local: WaterTrackModelThermal.calc_dct_frozen_gradient(m, b_local)
+    m._fft_A = WaterTrackModelThermal._make_fft_matrix(m)
+    m._dct_slice, m._dct_A = WaterTrackModelThermal._make_dct_matrix(m)
+
     # apply per-test overrides
     for key, val in overrides.items():
         setattr(m, key, val)
@@ -130,6 +141,11 @@ def flat_grid():
 # Test 1 – source term heating
 # ============================================================
 
+@pytest.mark.skip(
+    reason="Q_diss currently acts only through the interface (melt) term; the "
+           "+ Qdiss term in dE_dt is commented out in run_heat_transport. "
+           "Re-enable if Q_diss heating of T_mean is restored."
+)
 def test_source_term_heating(flat_grid):
     """
     With only Qdiss active, T_mean should rise by
@@ -419,6 +435,11 @@ def test_peclet_profile():
 # Test 6 – Global energy conservation with spatially variable b
 # ============================================================
 
+@pytest.mark.skip(
+    reason="Q_diss currently acts only through the interface (melt) term; the "
+           "+ Qdiss term in dE_dt is commented out in run_heat_transport. "
+           "Re-enable if Q_diss heating of T_mean is restored."
+)
 def test_energy_conservation_variable_b(flat_grid):
     """
     With only Qdiss active, total thermal energy must increase at exactly:

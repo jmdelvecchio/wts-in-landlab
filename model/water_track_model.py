@@ -9,6 +9,7 @@ import os
 from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
+from scipy.fft import dctn, idctn
 
 from landlab import imshow_grid
 from landlab.components import GroundwaterDupuitPercolator
@@ -315,6 +316,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         self.use_melt_diffusion = params.get('use_melt_diffusion', False)
         self.use_steady_hydrology = params.get('use_steady_hydrology', False)
         self.use_fourier_frozen_gradient = params.get('use_fourier_frozen_gradient', False)
+        self._use_dct_frozen_gradient = params.get('use_dct_frozen_gradient', False)
 
         self._T_mean = self._grid.at_node['mean_unfrozen__temperature']
 
@@ -342,6 +344,9 @@ class WaterTrackModelThermal(WaterTrackModelBase):
 
         # matrix for computing 2D FFT of state variables:
         self._fft_A = self._make_fft_matrix()
+        if self.use_fourier_frozen_gradient and self._use_dct_frozen_gradient:
+            raise ValueError("use_fourier_frozen_gradient and use_dct_frozen_gradient are mutually exclusive")
+        self._dct_slice, self._dct_A = self._make_dct_matrix()
 
         self._configure_output(output_dict)
 
@@ -376,6 +381,96 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         kx, ky = np.meshgrid(kx, ky)
         A = np.sqrt(kx**2 + ky**2)
         return A
+
+    def _make_dct_matrix(self):
+        """Make the slice and wavenumber matrix for the 2D DCT-II version of the
+        frozen gradient coefficient.
+
+        The DCT-II is the FFT of the mirror (even) extension of the field about
+        each edge of the transformed block, so it implies a zero-gradient wall
+        rather than the periodic wrap of np.fft.fft2. The transformed block is
+        the bounding box of the core nodes plus any fully open edge line:
+        closed nodes hold frozen initial values and would otherwise create a
+        step at every wall.
+
+        Wavenumbers are in cycles/m, k_n = n / (2 N dx), consistent with
+        _make_fft_matrix.
+        """
+        Ny, Nx = self._grid.shape
+        closed = self._closed_nodes.reshape(Ny, Nx)
+        core = (self._grid.status_at_node == self._grid.BC_NODE_IS_CORE).reshape(Ny, Nx)
+        rows = np.where(core.any(axis=1))[0]
+        cols = np.where(core.any(axis=0))[0]
+        r0, r1, c0, c1 = rows[0], rows[-1], cols[0], cols[-1]
+
+        # extend the core bounding box by one line on each side where that whole
+        # line (across the core span) is non-closed, i.e. an open boundary that
+        # evolves. Corner nodes are not covered by the span and are excluded.
+        if r0 > 0 and not closed[r0 - 1, c0:c1 + 1].any():
+            r0 -= 1
+        if r1 < Ny - 1 and not closed[r1 + 1, c0:c1 + 1].any():
+            r1 += 1
+        if c0 > 0 and not closed[r0:r1 + 1, c0 - 1].any():
+            c0 -= 1
+        if c1 < Nx - 1 and not closed[r0:r1 + 1, c1 + 1].any():
+            c1 += 1
+
+        sl = (slice(r0, r1 + 1), slice(c0, c1 + 1))
+        ny, nx = r1 - r0 + 1, c1 - c0 + 1
+
+        kx = np.arange(nx) / (2 * nx * self._grid.dx)
+        ky = np.arange(ny) / (2 * ny * self._grid.dy)
+        kx, ky = np.meshgrid(kx, ky)
+        return sl, np.sqrt(kx**2 + ky**2)
+
+    def calc_melt_diffusion(self, b_local):
+        """Use the Warburton 2024 method to calculate diffusion of active layer thickness"""
+
+        gradb = self._grid.calc_grad_at_link(b_local)
+        bprod = map_mean_of_link_nodes_to_link(self._grid, self._dzb_dt * b_local)
+        gradb_x, gradb_y = map_link_vector_components_to_node_raster(self._grid, gradb)
+        gradb_sq_node = gradb_x**2 + gradb_y**2
+        gradb_sq_link = map_mean_of_link_nodes_to_link(self._grid, gradb_sq_node)
+        return self._grid.calc_flux_div_at_node((gradb * bprod) / (1 + gradb_sq_link))
+
+    def calc_fourier_frozen_gradient(self, b_local):
+        """Use the Fourier method to calculate the frozen gradient"""
+
+        # convert thickness to fourier domain (reshape to 2D)
+        b_fft = np.fft.fft2(b_local.reshape(self._grid.shape))
+
+        # product with precomputed matrix for frozen gradient coefficient
+        Ab_fft = np.multiply(self._fft_A, b_fft)
+
+        # convert back to spatial domain (flatten for landlab grid)
+        self.frozen_grad_coef = np.real(np.fft.ifft2(Ab_fft)).flatten()
+
+        # scale the frozen gradient by the coefficient
+        frozen_grad = self.frozen_gradient * (1 + self.frozen_grad_coef) # check sign (+/-)?
+        return self.k_f * frozen_grad  # W/m2
+
+    def calc_dct_frozen_gradient(self, b_local):
+        """Use a DCT-II (mirror-extended) version of the Fourier method to
+        calculate the frozen gradient, avoiding the artificial step at the
+        domain edges that the periodic FFT sees.
+
+        The coefficient is zero on closed nodes (they are excluded from the
+        transform) and has zero mean over the transformed block, so the
+        correction redistributes flux without a net source.
+        """
+
+        b_block = b_local.reshape(self._grid.shape)[self._dct_slice]
+
+        # DCT of thickness, product with |k|, and inverse
+        b_dct = dctn(b_block, type=2, norm='ortho')
+        coef_block = idctn(self._dct_A * b_dct, type=2, norm='ortho')
+
+        coef = np.zeros(self._grid.shape)
+        coef[self._dct_slice] = coef_block
+        self.frozen_grad_coef = coef.flatten()
+
+        frozen_grad = self.frozen_gradient * (1 + self.frozen_grad_coef)
+        return self.k_f * frozen_grad  # W/m2
 
     def run_heat_transport(self):
         """
@@ -427,36 +522,23 @@ class WaterTrackModelThermal(WaterTrackModelBase):
             self.flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (b_local / 2)
             # self.flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (np.mean(b_local / 2))
 
-            # Stefan condition: local interface velocity for this substep [m/s]
+            # melt diffusion option (Warburton 2024)
             if self.use_melt_diffusion:
-                gradb = self._grid.calc_grad_at_link(b_local)
-                bprod = map_mean_of_link_nodes_to_link(self._grid, self._dzb_dt * b_local)
-                gradb_x, gradb_y = map_link_vector_components_to_node_raster(self._grid, gradb)
-                gradb_sq_node = gradb_x**2 + gradb_y**2
-                gradb_sq_link = map_mean_of_link_nodes_to_link(self._grid, gradb_sq_node)
-                self.melt_diffusion = self._grid.calc_flux_div_at_node((gradb * bprod) / (1 + gradb_sq_link))
+                self.melt_diffusion = self.calc_melt_diffusion(b_local)
             else:
                 self.melt_diffusion = 0.0
 
+            # diffusion of frozen gradient option
             if self.use_fourier_frozen_gradient:
-                # convert thickness to fourier domain (reshape to 2D)
-                b_fft = np.fft.fft2(b_local.reshape(self._grid.shape))
-
-                # product with precomputed matrix for frozen gradient coefficient
-                Ab_fft = np.multiply(self._fft_A, b_fft)
-
-                # convert back to spatial domain (flatten for landlab grid)
-                self.frozen_grad_coef = np.real(np.fft.ifft2(Ab_fft)).flatten()
-
-                # scale the frozen gradient by the coefficient
-                frozen_grad = self.frozen_gradient * (1 + self.frozen_grad_coef) # check sign (+/-)?
-                self.flux_frozen = self.k_f * frozen_grad  # W/m2
+                self.flux_frozen = self.calc_fourier_frozen_gradient(b_local)
+            elif self._use_dct_frozen_gradient:
+                self.flux_frozen = self.calc_dct_frozen_gradient(b_local)
             else:
                 self.flux_frozen = self.k_f * self.frozen_gradient  # W/m2
 
+            # Stefan condition: local interface velocity for this substep [m/s]
             # db_dt_local = (self.flux_unfrozen - self.flux_frozen) / (self.rho_w * self.phi * self.L) + self.melt_diffusion
             db_dt_local = (self.flux_unfrozen - self.flux_frozen + self._Qdiss) / (self.rho_w * self.phi * self.L) + self.melt_diffusion # put flux right on the boundary
-            # Closed nodes carry no flux so do not evolve
             db_dt_local[self._closed_nodes] = 0.0
 
             # Sensible heat content update [W/m2]

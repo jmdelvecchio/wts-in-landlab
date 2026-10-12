@@ -19,7 +19,7 @@ from model.water_track_model import WaterTrackModelThermal
 #%%
 # grid and initial conditions
 boundaries = {"top": "open", "left": "closed", "bottom": "closed", "right": "closed"}
-Nx = 100; Ny = 200; dx = 10
+Nx = 100; Ny = 200; dx = 0.1
 mg = RasterModelGrid((Ny,Nx), xy_spacing=dx, bc=boundaries)
 z = mg.add_zeros('topographic__elevation', at='node')
 zb = mg.add_zeros('aquifer_base__elevation', at='node')
@@ -29,9 +29,9 @@ tmean = mg.add_zeros("mean_unfrozen__temperature", at="node")
 # parabolic hillslope, uniform permeable thickness
 x = mg.x_of_node
 y = mg.y_of_node
-a = 0.0001
+a = 0.001
 b = 0.5 # permeable thickness m
-z[:] = -a * y**2 + a * 2000**2
+z[:] = -a * y**2 + a * 100**2
 zb[:] = z - b
 zwt[:] = zb + 0.1*b
 
@@ -44,14 +44,14 @@ plt.show()
 
 params = {}
 params['recharge_rate'] = 1.0e-6 # recharge rate (constant, uniform here) m/s
-params['hydraulic_conductivity'] = 1e-1 # hydraulic conductivity (constant, uniform here) m/s
+params['hydraulic_conductivity'] = 1e-2 # hydraulic conductivity (constant, uniform here) m/s
 params['porosity'] = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
 params['S0'] = 30.0 # 10 # W/m^2, peak solar irradiance
 
 params['frozen_gradient'] = 10.0 #10 # K/m, Temperature gradient in the frozen soil. In most recent model, positive is increasing temp vertically. 
 params['T_air'] = 1
-params['dt'] = 6*3600 # seconds
-params['T'] = 180 * 24 * 3600
+params['dt'] = 100 #6*3600 # seconds
+params['T'] = 30*24*3600 #180 * 24 * 3600
 params['courant_coefficient'] = 0.5
 # params['gwdt'] = 1e3 # seconds, groundwater model timestep 
 # params['tol'] = 1e-10 # tolerance for numerical solvers
@@ -59,7 +59,8 @@ params['courant_coefficient'] = 0.5
 
 params['use_melt_diffusion'] = False
 params['use_steady_hydrology'] = False
-params['use_fourier_frozen_gradient'] = True
+params['use_fourier_frozen_gradient'] = False
+params['use_dct_frozen_gradient'] = True
 
 ## parameters generally kept constant:
 params['kf'] = 2.728 # W/m/K, frozen soil
@@ -102,7 +103,7 @@ print(f'Current run ID: {output["run_id"]}')
 #%%
 ## Introduce random fluctuations to base elevation to seed water track formation
 lam = 5 # correlation length for the random field
-alpha = 0.01 # scaling factor for the random field #0.002
+alpha = 0.005 # scaling factor for the random field #0.002
 # fluct =  alpha * generate_correlated_random_field(Ny, Nx, lam/dx * 2, 2142025).flatten()
 fluct = alpha * np.random.randn(Ny, Nx).flatten()
 
@@ -148,7 +149,11 @@ plt.show()
 #%%
 
 plt.figure()
-imshow_grid(mg, z-zb, colorbar_label="Topographic Elevation (m)")
+imshow_grid(mg, z-zb, colorbar_label="Starting thickness (m)")
+plt.show()
+
+plt.figure()
+imshow_grid(mg, zb, colorbar_label="Thaw table elevation (m)")
 plt.show()
 
 #%%

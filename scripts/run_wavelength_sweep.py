@@ -1,8 +1,9 @@
 """
 Parallel model-comparison sweep.
 
-Runs WaterTrackModelBasic and WaterTrackModelThermal, each with melt
-diffusion on and off (4 structural configurations), across a set of initial
+Runs WaterTrackModelBasic and WaterTrackModelThermal, with melt diffusion
+on and off, plus the thermal model with the Fourier frozen-gradient
+correction (5 structural configurations), across a set of initial
 sinusoidal cross-slope perturbation wavelengths expressed as multiples of the
 linearly-predicted wavelength (calc_wavelenth_1). All runs share the same
 physical parameters and grid geometry -- the only things varied are model
@@ -67,12 +68,15 @@ AMPLITUDE = 0.01  # initial sinusoidal perturbation amplitude, m
 # multiples of the linearly-predicted wavelength to sweep over
 WAVELENGTH_MULTIPLES = [0.15, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]
 
-# the 4 structural configurations to compare
+# the structural configurations to compare:
+# (model class, use_melt_diffusion, use_fourier_frozen_gradient, label)
+# The Fourier frozen-gradient option only exists in WaterTrackModelThermal.
 MODEL_CONFIGS = [
-    (WaterTrackModelBasic, False, "basic_nomeltdiff"),
-    (WaterTrackModelBasic, True, "basic_meltdiff"),
-    (WaterTrackModelThermal, False, "thermal_nomeltdiff"),
-    (WaterTrackModelThermal, True, "thermal_meltdiff"),
+    (WaterTrackModelBasic, False, False, "basic_nomeltdiff"),
+    (WaterTrackModelBasic, True, False, "basic_meltdiff"),
+    (WaterTrackModelThermal, False, False, "thermal_nomeltdiff"),
+    (WaterTrackModelThermal, True, False, "thermal_meltdiff"),
+    (WaterTrackModelThermal, False, True, "thermal_fourier"),
 ]
 
 # single shared physical parameter set -- identical across every run and
@@ -188,11 +192,12 @@ print(f'Notional equilibrium T_mean: {BASE_T_EQ:.1f} C')
 
 def build_run_specs(model_configs, wavelength_multiples, base_wavelength):
     specs = []
-    for model_class, use_melt_diffusion, label in model_configs:
+    for model_class, use_melt_diffusion, use_fourier, label in model_configs:
         for multiple in wavelength_multiples:
             specs.append({
                 'model_class': model_class,
                 'use_melt_diffusion': use_melt_diffusion,
+                'use_fourier_frozen_gradient': use_fourier,
                 'label': label,
                 'wavelength_multiple': multiple,
                 'wavelength_target': multiple * base_wavelength,
@@ -234,6 +239,8 @@ def _run_one(spec):
 
     params = dict(BASE_PARAMS)
     params['use_melt_diffusion'] = spec['use_melt_diffusion']
+    if needs_tmean:
+        params['use_fourier_frozen_gradient'] = spec['use_fourier_frozen_gradient']
 
     run_name = f"{spec['label']}_wl{spec['wavelength_multiple']:.2f}"
     run_dir = os.path.join(OUTPUT_ROOT, run_name)
@@ -315,7 +322,7 @@ if __name__ == '__main__':
         """Fit fit_fn to each run's (t, xslope_var), plot the resulting rate
         vs. wavelength multiple (one curve per configuration), and save.
         """
-        growth_by_label = {label: ([], []) for _, _, label in MODEL_CONFIGS}
+        growth_by_label = {label: ([], []) for _, _, _, label in MODEL_CONFIGS}
         for r in results:
             rate_per_year = fit_fn(r['t'], r['xslope_var']) * seconds_per_year_scale
             growth_by_label[r['label']][0].append(r['wavelength_multiple'])
