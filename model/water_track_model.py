@@ -310,8 +310,9 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         self.C_s = params.get('C_s', 700) # J/kg/K, specific heat capacity of soil
         self.C_w = params.get('C_w', 4.2e3) # J/kg/K, specific heat capacity of water at ~5C
 
-        self.C_u = self.phi * self.C_w + (1 - self.phi) * self.C_s # J/kg/K, unfrozen specific heat capacity
-        self.rho_u = self.phi * self.rho_w + (1 - self.phi) * self.rho_s # kg/m^3, unfrozen density
+        # volumetric heat capacities, J/m^3/K
+        self.rhoC_w = self.rho_w * self.C_w # water: carries heat in advection
+        self.rhoC_u = self.phi * self.rho_w * self.C_w + (1 - self.phi) * self.rho_s * self.C_s # unfrozen bulk: heat storage
 
         self.use_melt_diffusion = params.get('use_melt_diffusion', False)
         self.use_steady_hydrology = params.get('use_steady_hydrology', False)
@@ -340,7 +341,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
 
         # depth-integrated sensible heat, J/m2
         self._E = self._grid.add_zeros('node', 'sensible_heat_content')
-        self._E = self.C_u * self.rho_u * self._b * (self._T_mean - self.Tm)
+        self._E = self.rhoC_u * self._b * (self._T_mean - self.Tm)
 
         # matrix for computing 2D FFT of state variables:
         self._fft_A = self._make_fft_matrix()
@@ -475,13 +476,13 @@ class WaterTrackModelThermal(WaterTrackModelBase):
     def run_heat_transport(self):
         """
         Update depth-averaged active layer temperature T_mean for one timestep dt, using 
-        a depth-integrated sensible heat formulation: E = Cu rho_u b (T_mean - Tm)
+        a depth-integrated sensible heat formulation: E = rhoC_u b (T_mean - Tm)
         Computes and stores dzb_dt via the Stefan condition for use in run_step().
         
         The depth-integrated heat equation for E is:
         
         dE/dt = div (ku b gradT) + Qdiss + BC_top - flux_unfrozen
-                - Cu rho_u * [div (T q) - T div q]
+                - rhoC_w * [div (T q) - T div q]
         
         where the Stefan condition at the base gives dzb_dt. The term [div (T q) - T div q]
         comes from the product rule: q grad T = div (T q) - T div q
@@ -548,7 +549,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
                 # + self._Qdiss # remove if putting the Qdiss in the interface term
                 + BC_top
                 - self.flux_frozen
-                - self.C_u * self.rho_u * lateral_advection
+                - self.rhoC_w * lateral_advection
             )
 
             # calculate courant minimum timestep
@@ -569,7 +570,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
 
             # recover T_mean from updated E and b_local
             self._T_mean[self._grid.core_nodes] = (
-                self.Tm + self._E[self._grid.core_nodes] / (self.C_u * self.rho_u * b_local[self._grid.core_nodes])
+                self.Tm + self._E[self._grid.core_nodes] / (self.rhoC_u * b_local[self._grid.core_nodes])
             )
 
             # Dynamic Dirichlet BC at open boundaries, refreshed each substep so

@@ -38,8 +38,8 @@ def make_model(grid, dt=3600.0, **overrides):
     # thermal parameters
     m.k_u   = 1.2682   # W m-1 K-1  unfrozen bulk
     m.k_f   = 2.728    # W m-1 K-1  frozen bulk
-    m.C_u   = 3835.6   # J kg-1 K-1 unfrozen bulk
-    m.rho_u = 1136.0   # kg m-3     unfrozen bulk (phi*rho_w + (1-phi)*rho_s)
+    m.rhoC_u = 3.962e6  # J m-3 K-1  unfrozen bulk (phi*rho_w*C_w + (1-phi)*rho_s*C_s)
+    m.rhoC_w = 4.2e6    # J m-3 K-1  water (rho_w*C_w), used for advection
     m.rho_w = 1000.0   # kg m-3
     m.phi   = 0.9      # –
     m.L     = 334e3    # J kg-1
@@ -150,7 +150,7 @@ def test_source_term_heating(flat_grid):
     """
     With only Qdiss active, T_mean should rise by
 
-        ΔT = Q0 * dt / (C_u * rho_u * b)
+        ΔT = Q0 * dt / (rhoC_u * b)
 
     Terms zeroed and why:
     ┌──────────────────────────────────────────────────────────┐
@@ -168,19 +168,19 @@ def test_source_term_heating(flat_grid):
 
     m = make_model(flat_grid, dt=dt, Tm=T0)
     m._T_mean[:] = T0
-    m._E[:]      = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
+    m._E[:]      = m.rhoC_u * m._b * (m._T_mean - m.Tm)
     m._b[:]      = b0
     m._Qdiss[:]  = Q0
 
     _run(m)
 
-    dT_expected = Q0 * dt / (m.C_u * m.rho_u * b0)
+    dT_expected = Q0 * dt / (m.rhoC_u * b0)
 
     np.testing.assert_allclose(
         m._T_mean[flat_grid.core_nodes],
         T0 + dT_expected,
         rtol=1e-6,
-        err_msg="Source term heating: T_mean did not match Q0*dt/(C_u*rho_u*b)",
+        err_msg="Source term heating: T_mean did not match Q0*dt/(rhoC_u*b)",
     )
 
 
@@ -210,7 +210,7 @@ def test_stefan_condition_decoupled(flat_grid):
 
     m = make_model(flat_grid, dt=dt, frozen_gradient=fg)
     m._T_mean[:] = T_val
-    m._E[:]      = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
+    m._E[:]      = m.rhoC_u * m._b * (m._T_mean - m.Tm)
     m._b[:]      = b0
 
     _run(m)
@@ -235,7 +235,7 @@ def test_top_bc_single_step(flat_grid):
     """
     With only BC_top active, one forward-Euler step should give
 
-        T_mean += (S0 + beta*(T_air - T_mean_0)) * dt / (C_u * rho_u * b)
+        T_mean += (S0 + beta*(T_air - T_mean_0)) * dt / (rhoC_u * b)
 
     Terms zeroed and why:
     ┌──────────────────────────────────────────────────────────┐
@@ -259,13 +259,13 @@ def test_top_bc_single_step(flat_grid):
 
     m = make_model(flat_grid, dt=dt, S0=S0, beta=beta, T_air=T_air, Tm=T0)
     m._T_mean[:] = T0
-    m._E[:]      = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
+    m._E[:]      = m.rhoC_u * m._b * (m._T_mean - m.Tm)
     m._b[:]      = b0
 
     _run(m)
 
     BC_top_0    = S0 + beta * (T_air - T0)
-    dT_expected = BC_top_0 * dt / (m.C_u * m.rho_u * b0)
+    dT_expected = BC_top_0 * dt / (m.rhoC_u * b0)
 
     np.testing.assert_allclose(
         m._T_mean[flat_grid.core_nodes],
@@ -284,7 +284,7 @@ def test_gaussian_spreading():
     Without advection, source terms, or vertical boundary fluxes, the second
     moment of a Gaussian temperature profile evolves as:
 
-        <r²>(t) = 2σ₀² + 4Dt,   D = k_u / (C_u * rho_u)
+        <r²>(t) = 2σ₀² + 4Dt,   D = k_u / (rhoC_u)
 
     Key insight: flux_unfrozen acts as a uniform multiplicative decay
     (dT/dt ∝ -λT), so T(r,t) = exp(-λt) * G(r; σ²(t)).  The decay factor
@@ -294,7 +294,7 @@ def test_gaussian_spreading():
 
     Parameter choices:
     ┌──────────────────────────────────────────────────────────────────┐
-    │  k_u = C_u = rho_u = 1  →  D = 1 m²/s  (clean arithmetic)     │
+    │  k_u = rhoC_u = rhoC_w = 1  →  D = 1 m²/s  (clean arithmetic)     │
     │  b = 1000 m              →  flux_unfrozen decay ≈ 2e-6 /s       │
     │                             τ_decay = 5e5 s ≫ t_test = 50 s    │
     │  σ₀ = 20 m, domain 200 m →  3σ = 60 m ≪ 100 m to wall         │
@@ -313,16 +313,16 @@ def test_gaussian_spreading():
     n_steps = 50
     sigma0  = 20.0   # m
 
-    m = make_model(mg, dt=dt, k_u=1.0, C_u=1.0, rho_u=1.0, Tm=0.0)
+    m = make_model(mg, dt=dt, k_u=1.0, rhoC_u=1.0, rhoC_w=1.0, Tm=0.0)
     m._b[:] = 1000.0   # suppresses flux_unfrozen term to negligible level
 
-    D = m.k_u / (m.C_u * m.rho_u)   # 1.0 m²/s
+    D = m.k_u / (m.rhoC_u)   # 1.0 m²/s
 
     xc = np.mean(mg.x_of_node[mg.core_nodes])
     yc = np.mean(mg.y_of_node[mg.core_nodes])
     r2 = (mg.x_of_node - xc)**2 + (mg.y_of_node - yc)**2
     m._T_mean[:] = np.exp(-r2 / (2.0 * sigma0**2))
-    m._E[:] = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
+    m._E[:] = m.rhoC_u * m._b * (m._T_mean - m.Tm)
     # boundary nodes: never updated by run_heat_transport; closed BCs mean
     # their values do not enter the flux divergence at core nodes
 
@@ -340,7 +340,7 @@ def test_gaussian_spreading():
         r2_mean, r2_expected,
         rtol=0.05,
         err_msg="Gaussian spreading: <r²> did not grow as 2σ₀² + 4Dt; "
-                "check D = k_u/(C_u*rho_u) in lateral diffusion term",
+                "check D = k_u/rhoC_u in lateral diffusion term",
     )
 
 
@@ -366,7 +366,7 @@ def test_peclet_profile():
 
     Parameter choices:
     ┌───────────────────────────────────────────────────────────────────────┐
-    │  k_u = C_u = rho_u = 1  →  D = 1.0 m²/s                                 │
+    │  k_u = rhoC_u = rhoC_w = 1  →  D = 1.0 m²/s                                 │
     │  u = 0.2 m/s, L = 10 m  →  Pe = 2  (well-resolved: δ = D/u = 5 cells) │
     │  b = 1000 m              →  vertical fluxes suppressed by 1/b²        │
     │  dt = 1 s < dt_Courant = 2.5 s  →  single substep per call            │
@@ -398,7 +398,7 @@ def test_peclet_profile():
 
     dt = 0.2   # s
 
-    m = make_model(mg, dt=dt, k_u=1.0, C_u=1.0, rho_u=1.0, Tm=0.0)
+    m = make_model(mg, dt=dt, k_u=1.0, rhoC_u=1.0, rhoC_w=1.0, Tm=0.0)
     m._b[:] = b_val
     # This test wants fixed reservoir BCs, not the model's dynamic
     # neighbor-mean open-boundary condition -- disable it here.
@@ -408,7 +408,7 @@ def test_peclet_profile():
     m._T_mean[:] = 0.5 * (T_hot + T_cold)
     # Fix Dirichlet values at all boundary nodes (they will not be updated)
     m._T_mean[mg.boundary_nodes] = T_analytical[mg.boundary_nodes]
-    m._E[:] = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
+    m._E[:] = m.rhoC_u * m._b * (m._T_mean - m.Tm)
 
     # Uniform upward flow: depth-integrated flux q = u * b on vertical links
     m.gdp._q[:] = 0.0
@@ -457,8 +457,8 @@ def test_energy_conservation_variable_b(flat_grid):
     └──────────────────────────────────────────────────────────────┘
 
     The algebraic cancellation is exact:
-        ΔT_i  = Q0 x dt / (C_u ρ_u b_i)
-        ΔE_i  = C_u ρ_u b_i x ΔT_i x A_cell = Q0 x dt x A_cell
+        ΔT_i  = Q0 x dt / (rhoC_u b_i)
+        ΔE_i  = rhoC_u b_i x ΔT_i x A_cell = Q0 x dt x A_cell
 
     so ΔE_total = Q0 x dt x Σ A_cell,  independent of the b distribution.
 
@@ -470,7 +470,7 @@ def test_energy_conservation_variable_b(flat_grid):
 
     m = make_model(flat_grid, dt=dt, Tm=0.0)
     m._T_mean[:] = 0.0   # T = Tm everywhere → flux_unfrozen = 0
-    m._E[:] = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
+    m._E[:] = m.rhoC_u * m._b * (m._T_mean - m.Tm)
 
     # Non-uniform b: the 1/b in ΔT must cancel with b in ΔE
     np.random.seed(1234)
@@ -482,7 +482,7 @@ def test_energy_conservation_variable_b(flat_grid):
 
     def total_energy(model):
         return (
-            model.C_u * model.rho_u
+            model.rhoC_u
             * np.sum(model._b[flat_grid.core_nodes]
                      * model._T_mean[flat_grid.core_nodes])
             * A_cell
@@ -535,7 +535,7 @@ def test_closed_nodes_never_update(mixed_boundary_grid):
     m = make_model(mg, dt=dt, S0=20.0, beta=0.04, T_air=5.0, frozen_gradient=1.0)
     m._T_mean[:] = 0.5
     m._b[:] = 1.0
-    m._E[:] = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
+    m._E[:] = m.rhoC_u * m._b * (m._T_mean - m.Tm)
     m._Qdiss[:] = 5.0
 
     closed = m._closed_nodes
@@ -613,7 +613,7 @@ def test_open_boundary_active_layer_can_deepen(mixed_boundary_grid):
     m = make_model(mg, dt=dt, S0=50.0, beta=0.04, T_air=5.0, frozen_gradient=0.05)
     m._T_mean[:] = 0.0
     m._b[:] = 1.0
-    m._E[:] = m.C_u * m.rho_u * m._b * (m._T_mean - m.Tm)
+    m._E[:] = m.rhoC_u * m._b * (m._T_mean - m.Tm)
     m._Qdiss[:] = 20.0
 
     for _ in range(5):
