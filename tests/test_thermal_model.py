@@ -57,6 +57,12 @@ def make_model(grid, dt=3600.0, **overrides):
     m.use_fourier_frozen_gradient = False
     m._use_dct_frozen_gradient    = False
 
+    # recharge heat (off by default)
+    m.use_recharge_heat = False
+    m.T_recharge        = 0.0     # °C
+    m.recharge_mixing   = 0.0
+    m._R_eff            = np.zeros(nn)   # m s-1
+
     # node arrays  (neutral initial state)
     m._T_mean        = np.zeros(nn)
     m._E             = np.zeros(nn)
@@ -75,6 +81,9 @@ def make_model(grid, dt=3600.0, **overrides):
     m.gdp     = _GDP()
     m.gdp._q  = np.zeros(nl)   # no lateral flow
     m.gdp._vel = np.zeros(nl)
+    m.gdp.recharge = np.zeros(nn)   # used by calc_effective_recharge
+    m.gdp._qsavg   = np.zeros(nn)
+    m.calc_effective_recharge = lambda: WaterTrackModelThermal.calc_effective_recharge(m)
 
     # boundary node bookkeeping, mirroring WaterTrackModelThermal.__init__ exactly so
     # closed/open node handling in run_heat_transport works on the stub too.
@@ -248,7 +257,7 @@ def test_top_bc_single_step(flat_grid):
 
     Analytical check (with defaults):
         BC_top_0    = 50 + 0.04*(5 - 0) = 50.2 W m-2
-        dT_expected = 50.2 * 3600 / (3835.6 * 1136 * 0.5)  ≈  0.083 K
+        dT_expected = 50.2 * 3600 / (3.962e6 * 0.5)  ≈  0.091 K
     """
     S0    = 50.0    # W m-2
     beta  = 0.04    # W m-2 K-1
@@ -631,3 +640,79 @@ def test_open_boundary_active_layer_can_deepen(mixed_boundary_grid):
         m._dzb_dt[m._closed_nodes], np.zeros(np.sum(m._closed_nodes)),
         err_msg="Closed nodes should remain inert even as the open boundary deepens",
     )
+
+
+# ============================================================
+# Recharge heat
+# ============================================================
+
+def _recharge_model(grid, R_eff, T0, T_R, **kw):
+    """Stub with only the recharge heat term active: k_u = 0 removes diffusion and
+    the interface flux, and everything else is off, so b is constant."""
+    m = make_model(grid, k_u=0.0, use_recharge_heat=True, T_recharge=T_R, **kw)
+    m._R_eff[:] = R_eff
+    m._T_mean[:] = T0
+    m._E[:] = m.rhoC_u * m._b * (m._T_mean - m.Tm)
+    return m
+
+
+def test_recharge_heat_single_step(flat_grid):
+    """One step changes T_mean by rhoC_w * R_eff * (T_R - T) * dt / (rhoC_u * b)."""
+    R_eff, T0, T_R, dt = 1e-7, 2.0, 6.0, 3600.0
+    m = _recharge_model(flat_grid, R_eff, T0, T_R, dt=dt)
+
+    _run(m)
+
+    dT_expected = m.rhoC_w * R_eff * (T_R - T0) * dt / (m.rhoC_u * m._b[0])
+    np.testing.assert_allclose(
+        m._T_mean[flat_grid.core_nodes], T0 + dT_expected, rtol=1e-6,
+        err_msg="Recharge heating: T_mean did not match forward-Euler prediction",
+    )
+
+
+def test_recharge_heat_relaxes_to_recharge_temperature(flat_grid):
+    """T_mean relaxes exponentially toward T_R with tau = rhoC_u b / (rhoC_w R_eff),
+    from above and from below, and never overshoots."""
+    R_eff, dt, n = 1e-7, 1e4, 500
+    for T0, T_R in [(1.0, 6.0), (8.0, 3.0)]:
+        m = _recharge_model(flat_grid, R_eff, T0, T_R, dt=dt)
+        tau = m.rhoC_u * m._b[0] / (m.rhoC_w * R_eff)
+        for _ in range(n):
+            _run(m)
+        T_expected = T_R + (T0 - T_R) * np.exp(-n * dt / tau)
+        np.testing.assert_allclose(
+            m._T_mean[flat_grid.core_nodes], T_expected, rtol=1e-3,
+            err_msg=f"Recharge heating: relaxation from {T0} to {T_R} off the analytical curve",
+        )
+        lo, hi = min(T0, T_R), max(T0, T_R)
+        assert np.all(m._T_mean[flat_grid.core_nodes] >= lo - 1e-12)
+        assert np.all(m._T_mean[flat_grid.core_nodes] <= hi + 1e-12)
+
+
+def test_recharge_heat_off_by_default(flat_grid):
+    """With use_recharge_heat False, R_eff and T_recharge have no effect."""
+    m = _recharge_model(flat_grid, 1e-7, 2.0, 6.0)
+    m.use_recharge_heat = False
+    _run(m)
+    np.testing.assert_allclose(m._T_mean[flat_grid.core_nodes], 2.0, rtol=1e-12)
+
+
+def test_recharge_heat_zero_when_at_recharge_temperature(flat_grid):
+    m = _recharge_model(flat_grid, 1e-7, 4.0, 4.0)
+    _run(m)
+    np.testing.assert_allclose(m._T_mean[flat_grid.core_nodes], 4.0, rtol=1e-12)
+
+
+@pytest.mark.parametrize("chi", [0.0, 0.3, 1.0])
+def test_effective_recharge_partition(flat_grid, chi):
+    """R_eff = (R - R_rej) + chi * R_rej with R_rej = min(R, qs), over the three regimes:
+    unsaturated (qs = 0), saturated divergent (0 < qs < R), exfiltration (qs > R)."""
+    R = 1e-8
+    m = make_model(flat_grid, recharge_mixing=chi)
+    m.gdp.recharge[:] = R
+    m.gdp._qsavg[:] = [0.0, 0.4 * R, 3.0 * R] * 16 + [0.0]   # 49 nodes
+
+    m.calc_effective_recharge()
+
+    expected = np.array([R, 0.6 * R + chi * 0.4 * R, chi * R] * 16 + [R])
+    np.testing.assert_allclose(m._R_eff, expected, rtol=1e-12)

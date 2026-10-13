@@ -319,6 +319,17 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         self.use_fourier_frozen_gradient = params.get('use_fourier_frozen_gradient', False)
         self._use_dct_frozen_gradient = params.get('use_dct_frozen_gradient', False)
 
+        # Heat carried into the profile by recharge water. T_recharge is the
+        # temperature of recharge water (C). recharge_mixing is the fraction
+        # of rejected recharge (rain that cannot infiltrate saturated ground)
+        # whose heat still mixes into the profile: 0 = runs off, 1 = fully mixes.
+        self.use_recharge_heat = params.get('use_recharge_heat', False)
+        self.T_recharge = params.get('T_recharge', self.T_air)
+        self.recharge_mixing = params.get('recharge_mixing', 0.0)
+        if not 0.0 <= self.recharge_mixing <= 1.0:
+            raise ValueError("recharge_mixing must be between 0 and 1")
+        self._R_eff = np.zeros(self._grid.number_of_nodes)  # m/s, effective recharge for heat
+
         self._T_mean = self._grid.at_node['mean_unfrozen__temperature']
 
         # Boundary node bookkeeping. State variables on closed nodes stay at their initial values.
@@ -424,6 +435,25 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         kx, ky = np.meshgrid(kx, ky)
         return sl, np.sqrt(kx**2 + ky**2)
 
+    def calc_effective_recharge(self):
+        """Calculate the recharge rate that delivers heat to the profile -- may 
+        include some heat from rejected recharge due to mixing.
+
+        On saturated nodes qs = max(R - div q, 0) is water leaving to the surface,
+        so recharge is partitioned as:
+            R_rej = min(R, qs)    rejected recharge (cannot infiltrate)
+            R_inf = R - R_rej     infiltrating recharge
+        Exfiltration in excess of R (qs - R) leaves at the local profile
+        temperature and so carries no net heat in the advection form used 
+        in run_heat_transport.
+        """
+
+        R = self.gdp.recharge
+        R_rej = np.minimum(R, self.gdp._qsavg) # use qsavg (avg over subtimesteps) to get best volumetric estimate
+
+        # effective recharge limited to R if no rejected recharge.
+        self._R_eff = (R - R_rej) + self.recharge_mixing * R_rej
+
     def calc_melt_diffusion(self, b_local):
         """Use the Warburton 2024 method to calculate diffusion of active layer thickness"""
 
@@ -481,8 +511,10 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         
         The depth-integrated heat equation for E is:
         
-        dE/dt = div (ku b gradT) + Qdiss + BC_top - flux_unfrozen
+        dE/dt = div (ku b gradT) + BC_top - flux_unfrozen 
+                + Qdiss                                     (if heat is put into profile rather than directly to boundary)
                 - rhoC_w * [div (T q) - T div q]
+                + rhoC_w * R_eff * (T_recharge - T_mean)    (if use_recharge_heat)
         
         where the Stefan condition at the base gives dzb_dt. The term [div (T q) - T div q]
         comes from the product rule: q grad T = div (T q) - T div q
@@ -542,6 +574,15 @@ class WaterTrackModelThermal(WaterTrackModelBase):
             db_dt_local = (self.flux_unfrozen - self.flux_frozen + self._Qdiss) / (self.rho_w * self.phi * self.L) + self.melt_diffusion # put flux right on the boundary
             db_dt_local[self._closed_nodes] = 0.0
 
+            # Heat advected by recharge water [W/m2]. Relaxes T_mean toward T_recharge;
+            # written with (T_recharge - T_mean) because the lateral advection above
+            # is in non-conservative form (q grad T), which already assumes water
+            # leaving or entering through div q carries the local temperature.
+            if self.use_recharge_heat:
+                recharge_heating = self.rhoC_w * self._R_eff * (self.T_recharge - self._T_mean)
+            else:
+                recharge_heating = 0.0
+
             # Sensible heat content update [W/m2]
             # Newly thawed material enters at Tm, contributing zero to E.
             dE_dt = (
@@ -550,6 +591,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
                 + BC_top
                 - self.flux_frozen
                 - self.rhoC_w * lateral_advection
+                + recharge_heating
             )
 
             # calculate courant minimum timestep
@@ -596,6 +638,9 @@ class WaterTrackModelThermal(WaterTrackModelBase):
             self.run_hydrology_steady()
         else:
             self.run_hydrology_dynamic()
+
+        if self.use_recharge_heat:
+            self.calc_effective_recharge()
 
         self.run_heat_transport()  # updates T_mean, calculates dzb_dt
 
