@@ -716,3 +716,29 @@ def test_effective_recharge_partition(flat_grid, chi):
 
     expected = np.array([R, 0.6 * R + chi * 0.4 * R, chi * R] * 16 + [R])
     np.testing.assert_allclose(m._R_eff, expected, rtol=1e-12)
+
+
+def test_recharge_heat_substeps_limited_by_relaxation_time(flat_grid):
+    """When dt >> tau the substep is capped at courant_coefficient * tau, so the
+    update stays monotone (no overshoot of T_R) where one full step would have
+    lambda = dt/tau > 2 and diverged."""
+    R_eff, T0, T_R = 1e-7, 1.0, 5.0
+    m = _recharge_model(flat_grid, R_eff, T0, T_R)
+    tau = m.rhoC_u * m._b[0] / (m.rhoC_w * R_eff)
+    m.dt = 10 * tau   # a single explicit step would have lambda = 10
+
+    _run(m)
+
+    n_expected = int(np.ceil(m.dt / (m._courant_coefficient * tau)))
+    assert m._num_substeps == n_expected
+    T = m._T_mean[flat_grid.core_nodes]
+    assert np.all(T >= T0) and np.all(T <= T_R + 1e-12)
+    np.testing.assert_allclose(T, T_R, atol=0.05 * (T_R - T0))   # (1-0.5)^20 relaxation
+
+
+def test_recharge_heat_no_substep_limit_when_off(flat_grid):
+    m = _recharge_model(flat_grid, 1e-7, 1.0, 5.0)
+    m.use_recharge_heat = False
+    m.dt = 1e9
+    _run(m)
+    assert m._num_substeps == 1

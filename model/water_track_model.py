@@ -317,7 +317,10 @@ class WaterTrackModelThermal(WaterTrackModelBase):
         self.use_melt_diffusion = params.get('use_melt_diffusion', False)
         self.use_steady_hydrology = params.get('use_steady_hydrology', False)
         self.use_fourier_frozen_gradient = params.get('use_fourier_frozen_gradient', False)
-        self._use_dct_frozen_gradient = params.get('use_dct_frozen_gradient', False)
+        self.use_dct_frozen_gradient = params.get('use_dct_frozen_gradient', False)
+        self.surface_boundary_type = params.get('surface_boundary_type', 'Neumann')
+        if not self.surface_boundary_type.lower() in ('neumann', 'dirichlet'):
+            raise ValueError("Surface boundary should either be Neumann or Dirichlet")
 
         # Heat carried into the profile by recharge water. T_recharge is the
         # temperature of recharge water (C). recharge_mixing is the fraction
@@ -352,11 +355,11 @@ class WaterTrackModelThermal(WaterTrackModelBase):
 
         # depth-integrated sensible heat, J/m2
         self._E = self._grid.add_zeros('node', 'sensible_heat_content')
-        self._E = self.rhoC_u * self._b * (self._T_mean - self.Tm)
+        self._E[:] = self.rhoC_u * self._b * (self._T_mean - self.Tm)
 
         # matrix for computing 2D FFT of state variables:
         self._fft_A = self._make_fft_matrix()
-        if self.use_fourier_frozen_gradient and self._use_dct_frozen_gradient:
+        if self.use_fourier_frozen_gradient and self.use_dct_frozen_gradient:
             raise ValueError("use_fourier_frozen_gradient and use_dct_frozen_gradient are mutually exclusive")
         self._dct_slice, self._dct_A = self._make_dct_matrix()
 
@@ -547,13 +550,17 @@ class WaterTrackModelThermal(WaterTrackModelBase):
             lateral_advection = flux_div_Tq - self._T_mean * flux_div_q  # K m/s at nodes
             # lateral_advection = np.zeros_like(self._T_mean)
 
-            # Top boundary condition [W/m2]
-            BC_top = self.S0 + self.beta * (self.T_air - self._T_mean)
-
             # Bottom boundary condition: heat flux from active layer to interface [W/m2]
             # Linear approximation to temperature profile, T drops from T_mean to Tm over b/2
             self.flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (b_local / 2)
-            # self.flux_unfrozen = self.k_u * (self._T_mean - self.Tm) / (np.mean(b_local / 2))
+
+            # Top boundary condition [W/m2]
+            if self.surface_boundary_type.lower() == 'neumann':
+                BC_top = self.S0 + self.beta * (self.T_air - self._T_mean)
+            elif self.surface_boundary_type.lower() == 'dirichlet':
+                BC_top = self.k_u * (self.T_air - self._T_mean) / (b_local / 2)
+            else:
+                raise ValueError(f"{self.surface_boundary_type} is not a supported surface boundary type")
 
             # melt diffusion option (Warburton 2024)
             if self.use_melt_diffusion:
@@ -564,7 +571,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
             # diffusion of frozen gradient option
             if self.use_fourier_frozen_gradient:
                 self.flux_frozen = self.calc_fourier_frozen_gradient(b_local)
-            elif self._use_dct_frozen_gradient:
+            elif self.use_dct_frozen_gradient:
                 self.flux_frozen = self.calc_dct_frozen_gradient(b_local)
             else:
                 self.flux_frozen = self.k_f * self.frozen_gradient  # W/m2
@@ -589,7 +596,7 @@ class WaterTrackModelThermal(WaterTrackModelBase):
                 lateral_diffusion
                 # + self._Qdiss # remove if putting the Qdiss in the interface term
                 + BC_top
-                - self.flux_frozen
+                - self.flux_unfrozen
                 - self.rhoC_w * lateral_advection
                 + recharge_heating
             )
@@ -603,7 +610,22 @@ class WaterTrackModelThermal(WaterTrackModelBase):
                     out=np.ones_like(self.gdp._vel) * 1e15,
                 )
             )
-            substep_dt = min([dt_courant, remaining_time])
+
+            # recharge heat relaxation timescale limit: keep dt/tau <= coefficient so the
+            # explicit update approaches T_recharge without overshooting
+            if self.use_recharge_heat:
+                R_core = self._R_eff[self._grid.core_nodes]
+                b_core = b_local[self._grid.core_nodes]
+                active = R_core > 0
+                if np.any(active):
+                    tau_min = np.min(self.rhoC_u * b_core[active] / (self.rhoC_w * R_core[active]))
+                    dt_recharge = self._courant_coefficient * tau_min
+                else:
+                    dt_recharge = np.inf
+            else:
+                dt_recharge = np.inf
+
+            substep_dt = min([dt_courant, dt_recharge, remaining_time])
 
             self._E[self._grid.core_nodes] += dE_dt[self._grid.core_nodes] * substep_dt
 
