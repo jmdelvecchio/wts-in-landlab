@@ -19,7 +19,7 @@ from model.water_track_model import WaterTrackModelThermal
 #%%
 # grid and initial conditions
 boundaries = {"top": "open", "left": "closed", "bottom": "closed", "right": "closed"}
-Nx = 100; Ny = 200; dx = 0.1
+Nx = 50; Ny = 200; dx = 10
 mg = RasterModelGrid((Ny,Nx), xy_spacing=dx, bc=boundaries)
 z = mg.add_zeros('topographic__elevation', at='node')
 zb = mg.add_zeros('aquifer_base__elevation', at='node')
@@ -29,9 +29,9 @@ tmean = mg.add_zeros("mean_unfrozen__temperature", at="node")
 # parabolic hillslope, uniform permeable thickness
 x = mg.x_of_node
 y = mg.y_of_node
-a = 0.001
-b = 0.5 # permeable thickness m
-z[:] = -a * y**2 + a * 100**2
+a = 0.0001
+b = 0.1 # permeable thickness m
+z[:] = -a * y**2 + a * 2000**2
 zb[:] = z - b
 zwt[:] = zb + 0.1*b
 
@@ -44,14 +44,14 @@ plt.show()
 
 params = {}
 params['recharge_rate'] = 1.0e-6 # recharge rate (constant, uniform here) m/s
-params['hydraulic_conductivity'] = 1e-2 # hydraulic conductivity (constant, uniform here) m/s
+params['hydraulic_conductivity'] = 1e-1 # hydraulic conductivity (constant, uniform here) m/s
 params['porosity'] = 0.9 # porosity (constant, uniform here) -- does not matter for steady state solution
-params['S0'] = 30.0 # 10 # W/m^2, peak solar irradiance
+params['S0'] = 0.0 # 10 # W/m^2, peak solar irradiance
 
-params['frozen_gradient'] = 10.0 #10 # K/m, Temperature gradient in the frozen soil. In most recent model, positive is increasing temp vertically. 
-params['T_air'] = 1
-params['dt'] = 100 #6*3600 # seconds
-params['T'] = 30*24*3600 #180 * 24 * 3600
+params['frozen_gradient'] = 0.0 #10 # K/m, Temperature gradient in the frozen soil. In most recent model, positive is increasing temp vertically. 
+params['T_air'] = 3
+params['dt'] = 3600 #6*3600 # seconds
+params['T'] = 180*24*3600 #180 * 24 * 3600
 params['courant_coefficient'] = 0.5
 # params['gwdt'] = 1e3 # seconds, groundwater model timestep 
 # params['tol'] = 1e-10 # tolerance for numerical solvers
